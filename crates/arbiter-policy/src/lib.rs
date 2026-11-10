@@ -3,6 +3,16 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod classify;
+pub mod governor;
+pub mod rules;
+pub mod signals;
+
+pub use classify::{classify, LoadClass};
+pub use governor::{GovDecision, Governor, HoldReason};
+pub use rules::{Profile, Rule, Want};
+pub use signals::{SideSignals, Snapshot};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Allocation {
     /// Physical cores the Windows vCPUs may run on.
