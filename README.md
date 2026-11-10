@@ -3,6 +3,8 @@
 > Windows and Linux running **at the same time** on one laptop, sharing CPU, RAM and GPU
 > dynamically, with Windows apps showing up as ordinary windows on your Linux desktop.
 
+Repo: <https://github.com/sreevarshan-xenoz/Arbiter>
+
 **Status: pre-alpha (Phase 0 — foundation).** Nothing here is usable yet; see the [roadmap](docs/ROADMAP.md).
 
 ## Why

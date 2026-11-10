@@ -3,6 +3,7 @@ name = "arbiter-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 arbiter-proto.workspace = true
