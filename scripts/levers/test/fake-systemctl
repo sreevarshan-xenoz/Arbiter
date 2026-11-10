@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+echo "systemctl $*" >> "${FAKE_LOG:?}"
+echo "Id=fake"

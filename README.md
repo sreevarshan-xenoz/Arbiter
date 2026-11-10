@@ -41,6 +41,7 @@ scripts/dev-setup.sh                 # toolchain, libvirt headers, MinGW
 cargo test --workspace
 cargo run -p arbiter-probe           # what tier is this machine?
 scripts/iommu-check.sh               # manual IOMMU/group check
+scripts/levers/test/run.sh           # dry-run tests of the manual lever scripts
 ```
 Details: [docs/DEV-ENVIRONMENT.md](docs/DEV-ENVIRONMENT.md). Real VM work: [docs/PHASE0.md](docs/PHASE0.md).
 

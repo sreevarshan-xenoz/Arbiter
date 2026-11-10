@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fake virsh for dry-run tests. Logs every call to $FAKE_LOG, returns canned read-only output.
+shift 2   # drop: -c <uri>
+echo "virsh $*" >> "${FAKE_LOG:?}"
+case "$1" in
+  domstate)  echo running ;;
+  vcpuinfo)  for i in 0 1 2 3; do echo "VCPU:           $i"; echo "CPU:            $i"; echo; done ;;
+  vcpupin|emulatorpin) echo "VCPU: CPU Affinity"; echo "0: 0-7" ;;
+  dominfo)   printf 'Max memory:     16777216 KiB\nUsed memory:    8388608 KiB\n' ;;
+  dommemstat) echo "actual 8388608"; echo "available 8000000" ;;
+  schedinfo) echo "cpu_shares      : 1024" ;;
+  version)   echo "Using library: libvirt 10.0.0" ;;
+  dumpxml)
+    echo "<domain>"
+    [ "${FAKE_HOSTDEV:-0}" = 1 ] && echo "  <hostdev mode='subsystem' type='pci'/>"
+    echo "  <memory model='virtio-mem'><target><size unit='GiB'>16</size><requested unit='MiB'>${FAKE_REQ_MIB:-2048}</requested><current unit='MiB'>${FAKE_CUR_MIB:-2048}</current></target><alias name='ua-vmem0'/></memory>"
+    echo "</domain>" ;;
+  *) echo ok ;;
+esac

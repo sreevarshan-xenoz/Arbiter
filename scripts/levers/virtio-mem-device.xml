@@ -1,0 +1,31 @@
+<!--
+  UNVERIFIED on Windows: this is the configuration Phase 0 must test (plan, verification row 4).
+  Merge into the domain with `virsh edit arbiter-win`, then fully power-cycle the VM.
+  Requirements (libvirt docs): <maxMemory>, a guest NUMA cell, shared memory backing; device in <devices>.
+  Windows needs the `viomem` driver from virtio-win. Test with AND without MSI-X on the device
+  (virtio-win issue 1679). Alias must start with "ua-" to be user-defined.
+
+  Top-level (outside <devices>):
+-->
+<memory unit='GiB'>8</memory>                 <!-- boot RAM (non-hotpluggable part) -->
+<maxMemory slots='4' unit='GiB'>24</maxMemory> <!-- boot RAM + virtio-mem size, rounded up -->
+<memoryBacking>
+  <source type='memfd'/>
+  <access mode='shared'/>
+</memoryBacking>
+<cpu mode='host-passthrough'>
+  <numa>
+    <cell id='0' cpus='0-7' memory='8' unit='GiB' memAccess='shared'/>   <!-- cpus = your vCPU range -->
+  </numa>
+</cpu>
+
+<!-- inside <devices>: -->
+<memory model='virtio-mem'>
+  <target>
+    <size unit='GiB'>16</size>        <!-- max hot-pluggable via this device -->
+    <node>0</node>
+    <block unit='MiB'>2</block>       <!-- block size; try larger if Windows/QEMU complains -->
+    <requested unit='GiB'>0</requested>  <!-- start with none plugged; lever grows it -->
+  </target>
+  <alias name='ua-vmem0'/>
+</memory>
