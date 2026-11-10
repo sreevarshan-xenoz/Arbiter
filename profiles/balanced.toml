@@ -1,0 +1,5 @@
+# Example profile (v1 rule syntax from the plan; engine not implemented yet).
+name = "balanced"
+[[rule]]
+when = 'windows.foreground in ["devenv.exe"] and windows.cpu > 70%'
+then = { windows_physical_cores = 6, windows_cpu_share = "high" }

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/arbiter-proto",
+    "crates/arbiter-policy",
+    "crates/arbiter-probe",
+    "crates/arbiterd",
+    "crates/arbiter-agent",
+    "crates/arbiter-shell",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+arbiter-proto = { path = "crates/arbiter-proto" }
+arbiter-policy = { path = "crates/arbiter-policy" }

@@ -1,0 +1,8 @@
+/target
+*.qcow2
+*.iso
+*.img
+.env
+__pycache__/
+ml/.venv/
+bench/results/*.csv

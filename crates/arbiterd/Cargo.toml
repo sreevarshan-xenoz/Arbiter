@@ -1,0 +1,15 @@
+[package]
+name = "arbiterd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Real libvirt backend. Needs libvirt-dev (apt) / libvirt-devel (dnf).
+libvirt = ["dep:virt"]
+
+[dependencies]
+arbiter-proto.workspace = true
+arbiter-policy.workspace = true
+virt = { version = "0.4", optional = true }

@@ -1,0 +1,8 @@
+[package]
+name = "arbiter-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arbiter-proto.workspace = true
