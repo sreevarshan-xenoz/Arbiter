@@ -25,6 +25,23 @@ Linux host                                   Windows guest
 3. match active profile rules (v3: ask predictor for next 30 s) → 4. compute target allocation →
 5. apply only if beyond hysteresis band and cooldown elapsed, smallest change first → 6. log decision, push to dashboard.
 
+## Control loop implementation (`arbiterd`, first cut)
+`Controller::tick(now_ms, &Snapshot, &mut dyn Levers) -> Decision` is the whole loop body; time and levers are injected, so a full
+session replays in a unit test with no clock, hypervisor or Windows guest.
+
+| Step | Where | Notes |
+|---|---|---|
+| collect | `arbiterd::collector` | host: `/proc/stat`, `/proc/meminfo`, named workloads from `/proc/*/comm`; guest: fed from the agent channel (not wired yet) |
+| classify | `arbiter_policy::classify` | idle / interactive / batch / gpu-heavy per side |
+| rules | `arbiter_policy::rules` | TOML profile, first match wins, conditions AND-ed, unknown keys rejected |
+| safety rails | `arbiter_policy::clamp` | applied to the target **and** to each intermediate step |
+| hysteresis | `arbiter_policy::governor` | band, 3 s cooldown, per-tick step caps; moves only the lever outside its band |
+| actuate | `arbiterd::levers::Levers` | pin guest vCPUs to the highest cores, fence host to the rest, set guest RAM; `LogLevers` (dry-run) until the libvirt actuator exists |
+| log | `Decision::to_json_line` | one JSON line per tick on stdout |
+
+Fail-safe behaviour: no agent data, or a report older than 5 s → **hold** (never guess); manual lock → hold; a lever error leaves the
+believed state unchanged and is logged. `cargo run -p arbiterd -- --ticks 3` shows it running (it holds, because no agent exists yet).
+
 ## Levers
 | Lever | Mechanism | Note |
 |---|---|---|

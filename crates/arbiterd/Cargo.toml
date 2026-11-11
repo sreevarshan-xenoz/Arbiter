@@ -13,4 +13,6 @@ libvirt = ["dep:virt"]
 [dependencies]
 arbiter-proto.workspace = true
 arbiter-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 virt = { version = "0.4", optional = true }

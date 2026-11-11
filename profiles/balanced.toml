@@ -1,5 +1,26 @@
-# Example profile (v1 rule syntax from the plan; engine not implemented yet).
+# Example profile. First matching [[rule]] wins; its `then` overrides [default].
+# Conditions inside one rule are AND-ed. Unknown keys are rejected.
 name = "balanced"
+
+# Linux process names that mark the host as running a batch workload.
+host_workloads = ["cargo", "rustc", "cc1", "gcc", "docker", "python3"]
+
+[default]
+guest_cores = 4
+guest_ram_mb = 8192
+
 [[rule]]
-when = 'windows.foreground in ["devenv.exe"] and windows.cpu > 70%'
-then = { windows_physical_cores = 6, windows_cpu_share = "high" }
+name = "windows build"
+guest_foreground_in = ["devenv.exe", "msbuild.exe"]
+guest_cpu_above = 70.0
+[rule.then]
+guest_cores = 6
+guest_ram_mb = 12288
+
+[[rule]]
+name = "linux batch while windows idle"
+host_class = "batch"
+guest_class = "idle"
+[rule.then]
+guest_cores = 2
+guest_ram_mb = 4096
