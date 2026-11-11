@@ -12,7 +12,7 @@ Principle: **Windows is less trusted than the Linux host; nothing is reachable f
 | Windows itself | malware | keep Defender/updates on; snapshot before risky installs |
 
 ## Security test list (run before each review)
-- [ ] malformed / oversized / out-of-range agent messages do not crash or confuse arbiterd (unit tests in `arbiter-proto` cover the first cases)
+- [ ] malformed / oversized / out-of-range agent messages do not crash or confuse arbiterd (unit tests in `arbiter-proto` and `arbiterd::channel` cover oversize, malformed, out-of-range, report-before-hello, wrong version and floods; still to do on a real VM)
 - [ ] RDP port unreachable from another machine on the LAN
 - [ ] shared folder scope is only the dedicated folder
 - [ ] `arbiter run` socket is 0600 and commands are logged

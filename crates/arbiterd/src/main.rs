@@ -1,3 +1,4 @@
+mod channel;
 mod collector;
 mod controller;
 mod levers;
@@ -16,6 +17,7 @@ struct Args {
     ticks: Option<u64>,
     guest_max_ram_mb: Option<u64>,
     guest_vcpus: Option<u32>,
+    agent_socket: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -25,6 +27,7 @@ fn parse_args() -> Result<Args, String> {
         ticks: None,
         guest_max_ram_mb: None,
         guest_vcpus: None,
+        agent_socket: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -47,9 +50,10 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|_| "bad --guest-vcpus")?,
                 )
             }
+            "--agent-socket" => a.agent_socket = Some(val("--agent-socket")?),
             "--check-libvirt" => {}
             "-h" | "--help" => return Err(
-                "usage: arbiterd [--profile FILE] [--tick-ms N] [--ticks N] [--guest-max-ram-mb N] [--guest-vcpus N]"
+                "usage: arbiterd [--profile FILE] [--tick-ms N] [--ticks N] [--guest-max-ram-mb N] [--guest-vcpus N] [--agent-socket PATH]"
                     .into(),
             ),
             other => return Err(format!("unknown argument '{other}'")),
@@ -145,10 +149,21 @@ fn main() {
     let mut collector = ProcCollector::new(profile.host_workloads.clone());
     let mut controller = Controller::new(profile, limits, Governor::default(), initial, core_order);
     let mut levers = levers::LogLevers;
+    let latest = channel::Latest::default();
+    match &args.agent_socket {
+        Some(p) => {
+            channel::spawn_client(p.into(), latest.clone());
+        }
+        None => eprintln!("no --agent-socket: no guest data, the controller will hold"),
+    }
 
     let start = Instant::now();
     let mut n = 0u64;
     loop {
+        let guest = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some((signals, received_at)) = guest {
+            collector.set_guest(signals, received_at);
+        }
         let snap = collector.collect();
         let decision = controller.tick(start.elapsed().as_millis() as u64, &snap, &mut levers);
         println!("{}", decision.to_json_line());
