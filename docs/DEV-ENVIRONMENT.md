@@ -13,6 +13,11 @@ cargo test --workspace
 cargo build -p arbiterd --features libvirt          # real libvirt backend
 cargo build -p arbiter-agent --target x86_64-pc-windows-gnu
 ```
+Whole loop on Linux, no VM (the agent plays QEMU + Windows with a fake probe; levers stay dry-run):
+```
+cargo run -p arbiter-agent -- --dev-listen target/agent.sock --fake-foreground devenv.exe --fake-cpu 90 &
+cargo run -p arbiterd -- --agent-socket target/agent.sock --ticks 10
+```
 All lever code goes behind the `Levers` trait with a `MockLevers`, so the policy/control loop is testable with no hypervisor.
 
 ## Layer 2 — real VM stack (needs real hardware, Phase 0)

@@ -4,7 +4,8 @@
 //!
 //! Windows is less trusted (docs/SECURITY-MODEL.md): every frame is size-capped by `arbiter_proto`,
 //! nothing is accepted before a matching `Hello`, every report is range-validated, and a flood
-//! drops the connection. Any error ends the session; the data then goes stale and the controller
+//! drops the connection. Reports that arrive before `Hello` (arbiterd joined mid-stream) are ignored
+//! unacked; the agent notices the silence and greets again, and a repeated `Hello` re-handshakes. Any error ends the session; the data then goes stale and the controller
 //! holds. Nothing received here is ever executed — it only becomes `SideSignals`.
 
 use crate::collector::signals_from_report;
@@ -28,8 +29,6 @@ pub type Latest = Arc<Mutex<Option<(SideSignals, Instant)>>>;
 
 #[derive(Debug, PartialEq)]
 pub enum SessionError {
-    ReportBeforeHello,
-    DuplicateHello,
     VersionMismatch { agent: u32 },
     Invalid(String),
     RateLimited,
@@ -71,9 +70,6 @@ impl Session {
         }
         match msg {
             AgentMessage::Hello { protocol, .. } => {
-                if self.greeted {
-                    return Err(SessionError::DuplicateHello);
-                }
                 if protocol != PROTOCOL_VERSION {
                     return Err(SessionError::VersionMismatch { agent: protocol });
                 }
@@ -87,7 +83,7 @@ impl Session {
             }
             AgentMessage::Report(r) => {
                 if !self.greeted {
-                    return Err(SessionError::ReportBeforeHello);
+                    return Ok((None, None)); // not greeted yet: ignore, the agent will say Hello
                 }
                 r.validate()
                     .map_err(|e| SessionError::Invalid(e.to_string()))?;
@@ -200,15 +196,15 @@ mod tests {
     }
 
     #[test]
-    fn report_before_hello_is_refused() {
+    fn report_before_hello_is_ignored_not_published() {
         assert_eq!(
             Session::new().handle(report(10.0), Instant::now()),
-            Err(SessionError::ReportBeforeHello)
+            Ok((None, None))
         );
     }
 
     #[test]
-    fn wrong_version_and_second_hello_are_refused() {
+    fn wrong_version_is_refused_and_a_second_hello_re_handshakes() {
         let t = Instant::now();
         assert_eq!(
             Session::new().handle(hello(PROTOCOL_VERSION + 1), t),
@@ -219,8 +215,10 @@ mod tests {
         let mut s = Session::new();
         s.handle(hello(PROTOCOL_VERSION), t).unwrap();
         assert_eq!(
-            s.handle(hello(PROTOCOL_VERSION), t),
-            Err(SessionError::DuplicateHello)
+            s.handle(hello(PROTOCOL_VERSION), t).unwrap().0,
+            Some(HostMessage::Welcome {
+                protocol: PROTOCOL_VERSION
+            })
         );
     }
 

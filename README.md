@@ -23,7 +23,7 @@ Not a gaming tool: kernel anti-cheat games refuse to run in VMs.
 | `arbiter-proto` | `crates/arbiter-proto` | versioned, validated agent↔daemon messages | v1 draft |
 | `arbiter-policy` | `crates/arbiter-policy` | allocation model + safety rails | rails, classifier, rules, hysteresis done |
 | `arbiterd` | `crates/arbiterd` | host daemon: collect → decide → apply via libvirt/cgroups | control loop (dry-run levers) |
-| `arbiter-agent` | `crates/arbiter-agent` | Windows service reporting foreground app and load | skeleton |
+| `arbiter-agent` | `crates/arbiter-agent` | Windows user-session agent reporting foreground app, CPU, RAM, idle time | v1 (not yet run on Windows) |
 | `arbiter-shell` | `crates/arbiter-shell` | RemoteApp windows, clipboard, shared folder, launcher | skeleton |
 | dashboard / ml / bench | `dashboard/` `ml/` `bench/` | web UI, predictor training, benchmarks | not started |
 

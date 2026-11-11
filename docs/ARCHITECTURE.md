@@ -4,7 +4,7 @@
 Linux host                                   Windows guest
 ┌────────────────────────────┐               ┌────────────────────────┐
 │ dashboard (web UI)         │               │ Windows apps           │
-│ arbiterd  ── policy ──┐    │  virtio-serial│ arbiter-agent (service)│
+│ arbiterd  ── policy ──┐    │  virtio-serial│ arbiter-agent (logon)  │
 │   collector → actuator│◄───┼──JSON, 1 s───►│  foreground/proc/load  │
 │ levers: libvirt, cgroup│   │               │ virtual HW: vCPU/RAM/GPU│
 │ arbiter-shell ◄────────┼───┼─RDP RemoteApp─►│ RemoteApp + share      │
@@ -16,7 +16,7 @@ Linux host                                   Windows guest
 - **arbiter-probe** – reads CPU flags, `/sys/kernel/iommu_groups`, PCI GPUs, `sriov_totalvfs`, RAM; `decide_tier()` is pure and unit-tested; later generates the libvirt domain XML.
 - **arbiterd** – tokio daemon. Talks to the hypervisor *only* through libvirt (so a Xen backend is possible later). Levers sit behind the `Levers` trait (`MockLevers` for tests).
 - **arbiter-policy** – `Allocation`, `Limits`, `clamp()` safety rails. Rules (v1) → hysteresis/cooldown (v2) → ML predictor (v3) sit in front of `clamp`, which always has the last word.
-- **arbiter-agent** – Windows service; reports foreground app, processes, GPU use, idle time every 1–2 s. Never changes allocation itself.
+- **arbiter-agent** – runs in the logged-in user's session (not a service: session 0 can't see the user's foreground window or input); reports foreground app, CPU, RAM in use and input idle time every 1 s. GPU use and the process list are not collected yet. Never changes allocation itself, executes nothing it receives. [ADR 0007](decisions/0007-agent-in-user-session.md).
 - **arbiter-proto** – shared message types; u32 big-endian length + JSON; 64 KiB frame cap; range validation.
 - **arbiter-shell** – FreeRDP RemoteApp windows, clipboard, shared folder, `.desktop` launcher entries, `arbiter run --windows <cmd>`.
 
@@ -67,10 +67,16 @@ thread and reconnects with backoff (0.5 s → 10 s). Domain XML:
   <target type='virtio' name='org.arbiter.agent.0'/>
 </channel>
 ```
-Per connection (`Session`): `Hello` with a matching version first (else drop), one `Hello` only, every `Report` range-validated,
-more than 10 messages/s drops the connection. Any error ends the session; the last report then ages past 5 s and the controller
+Per connection (`Session`): wrong protocol version drops the connection; reports before `Hello` are ignored (not published, not
+acked); a repeated `Hello` re-handshakes; every `Report` is range-validated; more than 10 messages/s drops the connection. Any error ends the session; the last report then ages past 5 s and the controller
 holds. Accepted reports become `SideSignals` only; nothing from Windows is executed.
 
-**Known limit:** virtio-serial has no message boundaries of its own. If the agent restarts mid-frame, the host may see a corrupt
-length and drop the session; reconnecting does not flush the guest side, so the stream may stay out of sync until the guest
-reopens the port. A resync marker (protocol v2) or the agent re-sending `Hello` after reopening is the fix — decide when the agent exists.
+### Agent end (`arbiter-agent`)
+Opens `\\.\Global\org.arbiter.agent.0` with overlapped I/O (a blocking read on a synchronous handle would also block writes),
+says `Hello`, then sends a `Report` every second and reads replies with a timeout until the next tick. It re-sends `Hello` every
+3 s until welcomed, and again when the host has been silent for 5 s (arbiterd restarted or joined mid-stream). A port error closes
+it; it reopens after 2 s.
+
+**Known limit:** virtio-serial has no message boundaries of its own. If the agent dies mid-frame, the host sees a corrupt length and
+drops the session, and the byte stream can stay misaligned until the agent reopens the port. Re-`Hello` recovers a host restart,
+not a torn frame; a resync marker would need protocol v2. Watch for it on a real VM before adding one.
