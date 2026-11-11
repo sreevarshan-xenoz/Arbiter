@@ -1,5 +1,5 @@
 //! Gathers the per-tick Snapshot. Host side reads /proc; guest side is fed from the agent channel
-//! (not wired yet) via `set_guest`. Stale guest data is treated as no data by the controller.
+//! (`channel`) via `set_guest`. Stale guest data is treated as no data by the controller.
 
 use arbiter_policy::{SideSignals, Snapshot};
 use std::fs;
@@ -60,7 +60,6 @@ impl ProcCollector {
 
     /// Feed the latest agent report and the moment it arrived. Its age is recomputed on every
     /// `collect`, so a channel that goes silent turns into stale data instead of looking fresh forever.
-    #[allow(dead_code)] // wired when the virtio-serial channel lands
     pub fn set_guest(&mut self, signals: SideSignals, received_at: Instant) {
         self.guest = Some((signals, received_at));
     }
@@ -125,7 +124,6 @@ impl Collector for ProcCollector {
 }
 
 /// Agent report -> control-loop signals.
-#[allow(dead_code)] // used once the guest channel is wired
 pub fn signals_from_report(r: &arbiter_proto::AgentReport) -> SideSignals {
     SideSignals {
         cpu_percent: r.cpu_percent,

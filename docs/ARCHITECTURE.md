@@ -31,7 +31,7 @@ session replays in a unit test with no clock, hypervisor or Windows guest.
 
 | Step | Where | Notes |
 |---|---|---|
-| collect | `arbiterd::collector` | host: `/proc/stat` minus guest-vCPU time, `/proc/meminfo`, named workloads from `/proc/*/comm`; guest: fed from the agent channel (not wired yet), age recomputed every tick |
+| collect | `arbiterd::collector` | host: `/proc/stat` minus guest-vCPU time, `/proc/meminfo`, named workloads from `/proc/*/comm`; guest: latest report from `arbiterd::channel` (`--agent-socket`), age recomputed every tick |
 | classify | `arbiter_policy::classify` | idle / interactive / batch / gpu-heavy per side |
 | rules | `arbiter_policy::rules` | TOML profile, first match wins, conditions AND-ed, unknown keys rejected |
 | safety rails | `arbiter_policy::clamp` | applied to the target **and** to each intermediate step; guest cores also capped at the VM's vCPU count; `Limits::validate` refuses machines where the rails can't hold |
@@ -40,7 +40,7 @@ session replays in a unit test with no clock, hypervisor or Windows guest.
 | log | `Decision::to_json_line` | one JSON line per tick on stdout |
 
 Fail-safe behaviour: no agent data, or a report older than 5 s → **hold** (never guess); manual lock → hold; a lever error is logged and
-the believed state only includes the levers that actually took effect. `cargo run -p arbiterd -- --ticks 3` shows it running (it holds, because no agent exists yet).
+the believed state only includes the levers that actually took effect. `cargo run -p arbiterd -- --ticks 3` shows it running (it holds: no `--agent-socket`, so no guest data).
 
 ## Levers
 | Lever | Mechanism | Note |
@@ -57,3 +57,20 @@ Counted in physical cores ([ADR 0006](decisions/0006-core-placement.md)): Linux 
 
 ## Protocol (v1)
 `AgentMessage::{Hello, Report}` / `HostMessage::{Welcome, Ack}`. Changing the schema bumps `PROTOCOL_VERSION`; agent and daemon are built against mocks so they can progress independently.
+
+### Host end (`arbiterd::channel`)
+QEMU exposes the guest's virtio-serial port as a unix socket; arbiterd connects as a client (`--agent-socket PATH`) on its own
+thread and reconnects with backoff (0.5 s → 10 s). Domain XML:
+```xml
+<channel type='unix'>
+  <source mode='bind' path='/run/arbiter/agent.sock'/>
+  <target type='virtio' name='org.arbiter.agent.0'/>
+</channel>
+```
+Per connection (`Session`): `Hello` with a matching version first (else drop), one `Hello` only, every `Report` range-validated,
+more than 10 messages/s drops the connection. Any error ends the session; the last report then ages past 5 s and the controller
+holds. Accepted reports become `SideSignals` only; nothing from Windows is executed.
+
+**Known limit:** virtio-serial has no message boundaries of its own. If the agent restarts mid-frame, the host may see a corrupt
+length and drop the session; reconnecting does not flush the guest side, so the stream may stay out of sync until the guest
+reopens the port. A resync marker (protocol v2) or the agent re-sending `Hello` after reopening is the fix — decide when the agent exists.
