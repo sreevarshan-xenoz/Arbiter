@@ -177,7 +177,7 @@ mod tests {
             &l,
         );
         assert_eq!(rule, None);
-        assert_eq!((w.guest_cores, w.guest_ram_mb), (4, 8192));
+        assert_eq!((w.guest_cores, w.guest_ram_mb), (2, 8192));
     }
 
     #[test]

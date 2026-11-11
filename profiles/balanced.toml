@@ -1,12 +1,14 @@
 # Example profile. First matching [[rule]] wins; its `then` overrides [default].
 # Conditions inside one rule are AND-ed. Unknown keys are rejected.
+# guest_cores counts PHYSICAL cores (each with its SMT siblings); the safety rails clamp every
+# value to what the machine allows (Linux keeps >= 2 cores; Windows >= 2 logical CPUs).
 name = "balanced"
 
 # Linux process names that mark the host as running a batch workload.
 host_workloads = ["cargo", "rustc", "cc1", "gcc", "docker", "python3"]
 
 [default]
-guest_cores = 4
+guest_cores = 2
 guest_ram_mb = 8192
 
 [[rule]]
@@ -22,5 +24,5 @@ name = "linux batch while windows idle"
 host_class = "batch"
 guest_class = "idle"
 [rule.then]
-guest_cores = 2
+guest_cores = 1
 guest_ram_mb = 4096

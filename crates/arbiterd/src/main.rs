@@ -101,20 +101,30 @@ fn main() {
         std::process::exit(2)
     });
 
-    // Every online CPU, from sysfs — not available_parallelism(), which shrinks under our own
-    // cpuset fencing and cgroup quotas.
+    // Physical cores and their SMT siblings, from sysfs — not available_parallelism(), which
+    // shrinks under our own cpuset fencing and cgroup quotas (and knows nothing about SMT).
     let core_order = topology::read_guest_core_order().unwrap_or_else(|| {
         let n = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
-        (0..n).rev().collect()
+        (0..n).rev().map(|c| vec![c]).collect()
     });
     let cores = core_order.len() as u32;
+    let cpus: usize = core_order.iter().map(Vec::len).sum();
     let ram = total_ram_mb();
     let guest_max = args.guest_max_ram_mb.unwrap_or(ram / 2).max(2048);
     let mut limits = Limits::new(cores, ram, guest_max);
-    // The libvirt backend will read this from the domain; until then assume the largest VM the rails allow.
-    limits.max_guest_cores = args
-        .guest_vcpus
-        .unwrap_or(cores.saturating_sub(limits.min_host_cores));
+    // Allocations count physical cores (ADR 0006). Linux keeps >= 2 of them; Windows keeps
+    // enough for >= 2 logical CPUs (one core on SMT machines), so a 4-core laptop can still move.
+    limits.min_guest_cores = topology::cores_for_cpus(&core_order, 2);
+    // The libvirt backend will read the vCPU count from the domain; until then assume the largest
+    // VM the rails allow.
+    limits.max_guest_cores = match args.guest_vcpus {
+        Some(v) => topology::cores_for_cpus(&core_order, v),
+        None => cores.saturating_sub(limits.min_host_cores),
+    };
+    if args.guest_vcpus.is_some_and(|v| v < 2) {
+        eprintln!("cannot run on this machine: VM needs at least 2 vCPUs");
+        std::process::exit(2);
+    }
     if let Err(e) = limits.validate() {
         eprintln!("cannot run on this machine: {e}");
         std::process::exit(2);
@@ -131,7 +141,7 @@ fn main() {
         0,
     );
 
-    eprintln!("arbiterd {} profile={} cores={cores} ram={ram}MiB guest_max={guest_max}MiB tick={}ms (dry-run levers)", env!("CARGO_PKG_VERSION"), profile.name, args.tick_ms);
+    eprintln!("arbiterd {} profile={} cores={cores} (cpus={cpus}) ram={ram}MiB guest_max={guest_max}MiB tick={}ms (dry-run levers)", env!("CARGO_PKG_VERSION"), profile.name, args.tick_ms);
     let mut collector = ProcCollector::new(profile.host_workloads.clone());
     let mut controller = Controller::new(profile, limits, Governor::default(), initial, core_order);
     let mut levers = levers::LogLevers;
