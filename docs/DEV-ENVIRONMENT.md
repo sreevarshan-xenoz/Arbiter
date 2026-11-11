@@ -22,5 +22,6 @@ Cloud containers/most VMs lack `/dev/kvm`, so this layer cannot run there.
 Start with `scripts/iommu-check.sh` and `cargo run -p arbiter-probe`.
 
 ## Status of this repo's environment (as set up on 10 Nov 2026)
-- Builds clean, 16 unit tests pass, clippy/fmt clean, libvirt feature and Windows target both build.
+- Builds clean, unit tests pass (`cargo test --workspace`; 51 as of 11 Nov 2026), clippy/fmt clean, libvirt feature and Windows target both build.
+- MSRV is Rust 1.82 (`Option::is_none_or`).
 - The cloud sandbox used for the initial scaffold has **no KVM, no VT-x flag**: probe correctly reports `Unsupported` there.

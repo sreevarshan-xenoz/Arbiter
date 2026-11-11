@@ -3,25 +3,29 @@
 
 use arbiter_policy::{SideSignals, Snapshot};
 use std::fs;
+use std::time::Instant;
 
 pub trait Collector {
     fn collect(&mut self) -> Snapshot;
 }
 
 /// (busy, total) jiffies from the aggregate `cpu` line of /proc/stat.
+/// Time spent running guest vCPUs (`guest`, `guest_nice`) is already counted inside `user`/`nice`;
+/// it is subtracted from `busy` so a busy Windows VM doesn't make Linux itself look busy.
 pub fn parse_cpu_times(stat: &str) -> Option<(u64, u64)> {
     let line = stat.lines().next()?;
     let mut f = line.split_whitespace();
     if f.next()? != "cpu" {
         return None;
     }
-    let v: Vec<u64> = f.take(8).filter_map(|x| x.parse().ok()).collect();
+    let v: Vec<u64> = f.take(10).map_while(|x| x.parse().ok()).collect();
     if v.len() < 4 {
         return None;
     }
-    let total: u64 = v.iter().sum();
+    let total: u64 = v.iter().take(8).sum();
     let idle = v[3] + v.get(4).copied().unwrap_or(0); // idle + iowait
-    Some((total - idle, total))
+    let guest = v.get(8).copied().unwrap_or(0) + v.get(9).copied().unwrap_or(0);
+    Some((total.saturating_sub(idle).saturating_sub(guest), total))
 }
 
 /// Used memory in MiB = MemTotal - MemAvailable.
@@ -41,7 +45,8 @@ pub fn parse_mem_used_mb(meminfo: &str) -> Option<u64> {
 pub struct ProcCollector {
     workloads: Vec<String>,
     prev: Option<(u64, u64)>,
-    guest: Option<(SideSignals, u64)>,
+    /// Latest agent report and when it arrived.
+    guest: Option<(SideSignals, Instant)>,
 }
 
 impl ProcCollector {
@@ -53,10 +58,11 @@ impl ProcCollector {
         }
     }
 
-    /// Feed the latest agent report and its age.
+    /// Feed the latest agent report and the moment it arrived. Its age is recomputed on every
+    /// `collect`, so a channel that goes silent turns into stale data instead of looking fresh forever.
     #[allow(dead_code)] // wired when the virtio-serial channel lands
-    pub fn set_guest(&mut self, signals: Option<(SideSignals, u64)>) {
-        self.guest = signals;
+    pub fn set_guest(&mut self, signals: SideSignals, received_at: Instant) {
+        self.guest = Some((signals, received_at));
     }
 
     fn running_workloads(&self) -> Vec<String> {
@@ -107,7 +113,7 @@ impl Collector for ProcCollector {
             ..Default::default()
         };
         let (guest, guest_age_ms) = match &self.guest {
-            Some((g, age)) => (Some(g.clone()), *age),
+            Some((g, at)) => (Some(g.clone()), at.elapsed().as_millis() as u64),
             None => (None, 0),
         };
         Snapshot {
@@ -140,6 +146,19 @@ mod tests {
         let (busy, total) =
             parse_cpu_times("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4\n").unwrap();
         assert_eq!((busy, total), (150, 1000));
+    }
+    #[test]
+    fn guest_vcpu_time_is_not_host_load() {
+        // user 600 of which guest 500: Linux itself only did 100 + 50 system.
+        let (busy, total) = parse_cpu_times("cpu  600 0 50 300 50 0 0 0 500 0\n").unwrap();
+        assert_eq!((busy, total), (150, 1000));
+    }
+    #[test]
+    fn guest_age_grows_while_the_channel_is_silent() {
+        let mut c = ProcCollector::new(vec![]);
+        let at = Instant::now() - std::time::Duration::from_secs(10);
+        c.set_guest(SideSignals::default(), at);
+        assert!(c.collect().guest_age_ms >= 10_000);
     }
     #[test]
     fn rejects_garbage_stat() {

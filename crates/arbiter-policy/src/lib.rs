@@ -32,6 +32,9 @@ pub struct Limits {
     pub guest_ram_headroom_mb: u64,
     /// Windows RAM never exceeds the VM's configured maximum.
     pub guest_ram_max_mb: u64,
+    /// The domain's vCPU count (fixed at boot). Pinning its vCPUs onto more physical cores than
+    /// this gains Windows nothing and only takes cores away from Linux.
+    pub max_guest_cores: u32,
 }
 
 impl Limits {
@@ -43,26 +46,49 @@ impl Limits {
             min_guest_cores: 2,
             guest_ram_headroom_mb: 1536,
             guest_ram_max_mb,
+            max_guest_cores: total_cores,
         }
+    }
+
+    /// Can the rails be satisfied at all on this machine/VM?
+    pub fn validate(&self) -> Result<(), String> {
+        if self.total_cores < self.min_host_cores + self.min_guest_cores {
+            return Err(format!(
+                "{} CPUs is too few: need {} for Linux + {} for Windows",
+                self.total_cores, self.min_host_cores, self.min_guest_cores
+            ));
+        }
+        if self.max_guest_cores < self.min_guest_cores {
+            return Err(format!(
+                "VM has {} vCPUs; at least {} are needed",
+                self.max_guest_cores, self.min_guest_cores
+            ));
+        }
+        Ok(())
     }
 }
 
 /// Clamp a wanted allocation to the plan's safety rails:
-/// never below 2 host / 2 guest cores; never shrink Windows RAM below
-/// its reported in-use memory + 1.5 GB.
+/// never below 2 host / 2 guest cores; never more guest cores than vCPUs; never shrink
+/// Windows RAM below its reported in-use memory + 1.5 GB.
+/// Assumes `l.validate()` passed; on impossible limits it still never underflows.
 pub fn clamp(want: Allocation, l: &Limits, guest_in_use_mb: u64) -> Allocation {
     let max_guest = l
         .total_cores
         .saturating_sub(l.min_host_cores)
-        .max(l.min_guest_cores);
-    let guest_cores = want.guest_cores.clamp(l.min_guest_cores, max_guest);
+        .min(l.max_guest_cores)
+        .max(l.min_guest_cores)
+        .min(l.total_cores);
+    let guest_cores = want
+        .guest_cores
+        .clamp(l.min_guest_cores.min(max_guest), max_guest);
     let ram_floor = guest_in_use_mb
         .saturating_add(l.guest_ram_headroom_mb)
         .min(l.guest_ram_max_mb);
     let guest_ram_mb = want.guest_ram_mb.clamp(ram_floor, l.guest_ram_max_mb);
     Allocation {
         guest_cores,
-        host_cores: l.total_cores - guest_cores,
+        host_cores: l.total_cores.saturating_sub(guest_cores),
         guest_ram_mb,
     }
 }
@@ -126,5 +152,48 @@ mod tests {
             1000,
         );
         assert_eq!(a.guest_ram_mb, 16384);
+    }
+
+    #[test]
+    fn never_more_guest_cores_than_vcpus() {
+        let l = Limits {
+            max_guest_cores: 4,
+            ..L()
+        };
+        let a = clamp(
+            Allocation {
+                guest_cores: 6,
+                host_cores: 2,
+                guest_ram_mb: 8192,
+            },
+            &l,
+            1000,
+        );
+        assert_eq!((a.guest_cores, a.host_cores), (4, 4));
+    }
+
+    #[test]
+    fn tiny_machines_are_rejected_and_never_underflow() {
+        for cores in 0..4 {
+            let l = Limits::new(cores, 4096, 2048);
+            assert!(l.validate().is_err(), "{cores} cores accepted");
+            let a = clamp(
+                Allocation {
+                    guest_cores: 2,
+                    host_cores: 0,
+                    guest_ram_mb: 1024,
+                },
+                &l,
+                0,
+            );
+            assert_eq!(a.guest_cores + a.host_cores, cores);
+        }
+        assert!(L().validate().is_ok());
+        assert!(Limits {
+            max_guest_cores: 1,
+            ..L()
+        }
+        .validate()
+        .is_err());
     }
 }

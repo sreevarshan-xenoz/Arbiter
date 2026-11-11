@@ -44,16 +44,27 @@ pub struct Controller {
     governor: Governor,
     current: Allocation,
     locked: bool,
+    /// Logical CPUs in the order Windows takes them (see `topology`); the host gets the rest.
+    core_order: Vec<u32>,
 }
 
 impl Controller {
-    pub fn new(profile: Profile, limits: Limits, governor: Governor, initial: Allocation) -> Self {
+    /// `core_order` must list every logical CPU exactly once (`limits.total_cores` entries).
+    pub fn new(
+        profile: Profile,
+        limits: Limits,
+        governor: Governor,
+        initial: Allocation,
+        core_order: Vec<u32>,
+    ) -> Self {
+        debug_assert_eq!(core_order.len(), limits.total_cores as usize);
         Self {
             profile,
             limits,
             governor,
             current: initial,
             locked: false,
+            core_order,
         }
     }
 
@@ -104,10 +115,7 @@ impl Controller {
                 // Re-clamp the intermediate step: a RAM step must still respect in-use + headroom.
                 let next = arbiter_policy::clamp(next, &self.limits, guest.mem_used_mb);
                 d.outcome = match self.actuate(next, levers) {
-                    Ok(()) => {
-                        self.current = next;
-                        Outcome::Applied(next)
-                    }
+                    Ok(()) => Outcome::Applied(next),
                     Err(e) => Outcome::LeverError(e),
                 };
             }
@@ -115,17 +123,35 @@ impl Controller {
         d
     }
 
-    /// Guest takes the highest-numbered cores, host keeps the low ones.
-    fn actuate(&self, next: Allocation, levers: &mut dyn Levers) -> Result<(), String> {
-        let total = self.limits.total_cores;
-        let guest: Vec<u32> = (total - next.guest_cores..total).collect();
-        let host: Vec<u32> = (0..total - next.guest_cores).collect();
+    /// Split `core_order` into (guest, host) CPU sets, each sorted.
+    fn split(&self, guest_cores: u32) -> (Vec<u32>, Vec<u32>) {
+        let n = (guest_cores as usize).min(self.core_order.len());
+        let (mut g, mut h) = (self.core_order[..n].to_vec(), self.core_order[n..].to_vec());
+        g.sort_unstable();
+        h.sort_unstable();
+        (g, h)
+    }
+
+    /// Apply `next` lever by lever, committing each to `self.current` only once it took effect,
+    /// so the believed state always matches what the hypervisor was actually told.
+    fn actuate(&mut self, next: Allocation, levers: &mut dyn Levers) -> Result<(), String> {
         if next.guest_cores != self.current.guest_cores {
+            let (guest, host) = self.split(next.guest_cores);
             levers.pin_guest_vcpus(&guest)?;
-            levers.fence_host_cores(&host)?;
+            if let Err(e) = levers.fence_host_cores(&host) {
+                // Don't leave Windows on cores the host is still allowed to use: undo the pin.
+                let (old_guest, _) = self.split(self.current.guest_cores);
+                return Err(match levers.pin_guest_vcpus(&old_guest) {
+                    Ok(()) => format!("fence host: {e} (vCPU pin rolled back)"),
+                    Err(e2) => format!("fence host: {e}; rollback of vCPU pin also failed: {e2}"),
+                });
+            }
+            self.current.guest_cores = next.guest_cores;
+            self.current.host_cores = next.host_cores;
         }
         if next.guest_ram_mb != self.current.guest_ram_mb {
             levers.set_guest_memory_mb(next.guest_ram_mb)?;
+            self.current.guest_ram_mb = next.guest_ram_mb;
         }
         Ok(())
     }
@@ -145,7 +171,8 @@ mod tests {
             host_cores: 4,
             guest_ram_mb: 8192,
         };
-        Controller::new(p, limits, Governor::default(), init)
+        // No-SMT layout: guest takes 7, 6, 5, ... so the sets read as plain ranges.
+        Controller::new(p, limits, Governor::default(), init, (0..8).rev().collect())
     }
     fn snap(fg: Option<&str>, cpu: f32, mem_used: u64) -> Snapshot {
         Snapshot {
@@ -256,6 +283,63 @@ mod tests {
         let d = c.tick(0, &building(), &mut l);
         assert!(matches!(d.outcome, Outcome::LeverError(_)));
         assert_eq!(c.current().guest_cores, 4);
+    }
+
+    #[test]
+    fn failed_fence_rolls_back_the_pin() {
+        let (mut c, mut l) = (
+            controller(),
+            MockLevers {
+                fail_fence: true,
+                ..Default::default()
+            },
+        );
+        let d = c.tick(0, &building(), &mut l);
+        assert!(matches!(&d.outcome, Outcome::LeverError(e) if e.contains("rolled back")));
+        // pinned to the new set, then back to the old one; RAM never touched
+        assert_eq!(l.pins, vec![vec![2, 3, 4, 5, 6, 7], vec![4, 5, 6, 7]]);
+        assert!(l.mem.is_empty());
+        assert_eq!(c.current().guest_cores, 4);
+    }
+
+    #[test]
+    fn failed_ram_change_still_records_the_core_change() {
+        let (mut c, mut l) = (
+            controller(),
+            MockLevers {
+                fail_mem: true,
+                ..Default::default()
+            },
+        );
+        let d = c.tick(0, &building(), &mut l);
+        assert!(matches!(d.outcome, Outcome::LeverError(_)));
+        // cores really moved, so the controller must believe they did
+        assert_eq!(c.current().guest_cores, 6);
+        assert_eq!(c.current().guest_ram_mb, 8192);
+    }
+
+    #[test]
+    fn smt_siblings_never_split_between_host_and_guest() {
+        let p = Profile::from_toml(include_str!("../../../profiles/balanced.toml")).unwrap();
+        let init = Allocation {
+            guest_cores: 2,
+            host_cores: 6,
+            guest_ram_mb: 8192,
+        };
+        // siblings (0,4) (1,5) (2,6) (3,7)
+        let order =
+            crate::topology::guest_core_order((0..8).map(|c| vec![c % 4, c % 4 + 4]).collect());
+        let mut c = Controller::new(
+            p,
+            Limits::new(8, 32768, 16384),
+            Governor::default(),
+            init,
+            order,
+        );
+        let mut l = MockLevers::default();
+        c.tick(0, &snap(None, 30.0, 1000), &mut l); // default: 4 guest cores
+        assert_eq!(l.pins.last().unwrap(), &vec![2, 3, 6, 7]);
+        assert_eq!(l.fences.last().unwrap(), &vec![0, 1, 4, 5]);
     }
 
     #[test]
