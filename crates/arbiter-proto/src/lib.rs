@@ -102,6 +102,36 @@ pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<T,
     Ok(serde_json::from_slice(&body)?)
 }
 
+/// Incremental frame decoder for transports that deliver bytes in arbitrary chunks (reads with a
+/// timeout, overlapped I/O). Same wire format and size cap as `read_frame`.
+#[derive(Debug, Default)]
+pub struct FrameBuf {
+    buf: Vec<u8>,
+}
+
+impl FrameBuf {
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// Next complete frame, if any. After an error the stream is out of sync: drop the connection.
+    pub fn pop<T: for<'de> Deserialize<'de>>(&mut self) -> Result<Option<T>, ProtoError> {
+        if self.buf.len() < 4 {
+            return Ok(None);
+        }
+        let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        if len > MAX_FRAME_BYTES {
+            return Err(ProtoError::FrameTooLarge(len));
+        }
+        if self.buf.len() < 4 + len {
+            return Ok(None);
+        }
+        let msg = serde_json::from_slice(&self.buf[4..4 + len]);
+        self.buf.drain(..4 + len);
+        Ok(Some(msg?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +175,35 @@ mod tests {
         buf.extend_from_slice(b"{{{");
         let r: Result<AgentMessage, _> = read_frame(&mut buf.as_slice());
         assert!(matches!(r, Err(ProtoError::Json(_))));
+    }
+
+    #[test]
+    fn framebuf_reassembles_byte_by_byte_and_back_to_back() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &HostMessage::Welcome { protocol: 1 }).unwrap();
+        write_frame(&mut wire, &HostMessage::Ack).unwrap();
+        let mut fb = FrameBuf::default();
+        let mut got = Vec::new();
+        for b in &wire {
+            fb.push(&[*b]);
+            while let Some(m) = fb.pop::<HostMessage>().unwrap() {
+                got.push(m);
+            }
+        }
+        assert_eq!(
+            got,
+            vec![HostMessage::Welcome { protocol: 1 }, HostMessage::Ack]
+        );
+    }
+
+    #[test]
+    fn framebuf_rejects_oversize_before_buffering_it() {
+        let mut fb = FrameBuf::default();
+        fb.push(&u32::MAX.to_be_bytes());
+        assert!(matches!(
+            fb.pop::<HostMessage>(),
+            Err(ProtoError::FrameTooLarge(_))
+        ));
     }
 
     #[test]
