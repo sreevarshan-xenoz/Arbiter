@@ -31,16 +31,16 @@ session replays in a unit test with no clock, hypervisor or Windows guest.
 
 | Step | Where | Notes |
 |---|---|---|
-| collect | `arbiterd::collector` | host: `/proc/stat`, `/proc/meminfo`, named workloads from `/proc/*/comm`; guest: fed from the agent channel (not wired yet) |
+| collect | `arbiterd::collector` | host: `/proc/stat` minus guest-vCPU time, `/proc/meminfo`, named workloads from `/proc/*/comm`; guest: fed from the agent channel (not wired yet), age recomputed every tick |
 | classify | `arbiter_policy::classify` | idle / interactive / batch / gpu-heavy per side |
 | rules | `arbiter_policy::rules` | TOML profile, first match wins, conditions AND-ed, unknown keys rejected |
-| safety rails | `arbiter_policy::clamp` | applied to the target **and** to each intermediate step |
+| safety rails | `arbiter_policy::clamp` | applied to the target **and** to each intermediate step; guest cores also capped at the VM's vCPU count; `Limits::validate` refuses machines where the rails can't hold |
 | hysteresis | `arbiter_policy::governor` | band, 3 s cooldown, per-tick step caps; moves only the lever outside its band |
-| actuate | `arbiterd::levers::Levers` | pin guest vCPUs to the highest cores, fence host to the rest, set guest RAM; `LogLevers` (dry-run) until the libvirt actuator exists |
+| actuate | `arbiterd::levers::Levers` | guest takes whole physical cores (SMT siblings together, CPU 0 last; `arbiterd::topology`), host is fenced to the rest, then guest RAM; each lever commits to the believed state only once it took effect, a failed fence rolls back the pin; `LogLevers` (dry-run) until the libvirt actuator exists |
 | log | `Decision::to_json_line` | one JSON line per tick on stdout |
 
-Fail-safe behaviour: no agent data, or a report older than 5 s → **hold** (never guess); manual lock → hold; a lever error leaves the
-believed state unchanged and is logged. `cargo run -p arbiterd -- --ticks 3` shows it running (it holds, because no agent exists yet).
+Fail-safe behaviour: no agent data, or a report older than 5 s → **hold** (never guess); manual lock → hold; a lever error is logged and
+the believed state only includes the levers that actually took effect. `cargo run -p arbiterd -- --ticks 3` shows it running (it holds, because no agent exists yet).
 
 ## Levers
 | Lever | Mechanism | Note |

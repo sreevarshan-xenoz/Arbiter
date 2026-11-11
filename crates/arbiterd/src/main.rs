@@ -1,6 +1,7 @@
 mod collector;
 mod controller;
 mod levers;
+mod topology;
 
 use arbiter_policy::{Allocation, Governor, Limits, Profile};
 use collector::{Collector, ProcCollector};
@@ -14,6 +15,7 @@ struct Args {
     tick_ms: u64,
     ticks: Option<u64>,
     guest_max_ram_mb: Option<u64>,
+    guest_vcpus: Option<u32>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -22,6 +24,7 @@ fn parse_args() -> Result<Args, String> {
         tick_ms: 1000,
         ticks: None,
         guest_max_ram_mb: None,
+        guest_vcpus: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -37,9 +40,16 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|_| "bad --guest-max-ram-mb")?,
                 )
             }
+            "--guest-vcpus" => {
+                a.guest_vcpus = Some(
+                    val("--guest-vcpus")?
+                        .parse()
+                        .map_err(|_| "bad --guest-vcpus")?,
+                )
+            }
             "--check-libvirt" => {}
             "-h" | "--help" => return Err(
-                "usage: arbiterd [--profile FILE] [--tick-ms N] [--ticks N] [--guest-max-ram-mb N]"
+                "usage: arbiterd [--profile FILE] [--tick-ms N] [--ticks N] [--guest-max-ram-mb N] [--guest-vcpus N]"
                     .into(),
             ),
             other => return Err(format!("unknown argument '{other}'")),
@@ -91,16 +101,30 @@ fn main() {
         std::process::exit(2)
     });
 
-    let cores = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+    // Every online CPU, from sysfs — not available_parallelism(), which shrinks under our own
+    // cpuset fencing and cgroup quotas.
+    let core_order = topology::read_guest_core_order().unwrap_or_else(|| {
+        let n = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+        (0..n).rev().collect()
+    });
+    let cores = core_order.len() as u32;
     let ram = total_ram_mb();
     let guest_max = args.guest_max_ram_mb.unwrap_or(ram / 2).max(2048);
-    let limits = Limits::new(cores, ram, guest_max);
+    let mut limits = Limits::new(cores, ram, guest_max);
+    // The libvirt backend will read this from the domain; until then assume the largest VM the rails allow.
+    limits.max_guest_cores = args
+        .guest_vcpus
+        .unwrap_or(cores.saturating_sub(limits.min_host_cores));
+    if let Err(e) = limits.validate() {
+        eprintln!("cannot run on this machine: {e}");
+        std::process::exit(2);
+    }
     // Start from an even split; the libvirt backend will read the real state from the domain.
     let g = (cores / 2).max(2);
     let initial = arbiter_policy::clamp(
         Allocation {
             guest_cores: g,
-            host_cores: cores - g,
+            host_cores: cores.saturating_sub(g),
             guest_ram_mb: guest_max / 2,
         },
         &limits,
@@ -109,7 +133,7 @@ fn main() {
 
     eprintln!("arbiterd {} profile={} cores={cores} ram={ram}MiB guest_max={guest_max}MiB tick={}ms (dry-run levers)", env!("CARGO_PKG_VERSION"), profile.name, args.tick_ms);
     let mut collector = ProcCollector::new(profile.host_workloads.clone());
-    let mut controller = Controller::new(profile, limits, Governor::default(), initial);
+    let mut controller = Controller::new(profile, limits, Governor::default(), initial, core_order);
     let mut levers = levers::LogLevers;
 
     let start = Instant::now();

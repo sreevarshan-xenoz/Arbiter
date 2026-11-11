@@ -37,7 +37,10 @@ pub struct MockLevers {
     pub pins: Vec<Vec<u32>>,
     pub fences: Vec<Vec<u32>>,
     pub mem: Vec<u64>,
+    /// Fail the vCPU pin / host fence / memory lever respectively.
     pub fail: bool,
+    pub fail_fence: bool,
+    pub fail_mem: bool,
 }
 
 #[cfg(test)]
@@ -50,10 +53,16 @@ impl Levers for MockLevers {
         Ok(())
     }
     fn fence_host_cores(&mut self, cores: &[u32]) -> Result<(), String> {
+        if self.fail_fence {
+            return Err("mock fence failure".into());
+        }
         self.fences.push(cores.to_vec());
         Ok(())
     }
     fn set_guest_memory_mb(&mut self, mb: u64) -> Result<(), String> {
+        if self.fail_mem {
+            return Err("mock memory failure".into());
+        }
         self.mem.push(mb);
         Ok(())
     }
