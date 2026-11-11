@@ -44,18 +44,19 @@ pub struct Controller {
     governor: Governor,
     current: Allocation,
     locked: bool,
-    /// Logical CPUs in the order Windows takes them (see `topology`); the host gets the rest.
-    core_order: Vec<u32>,
+    /// Physical cores (each a list of its logical CPUs) in the order Windows takes them
+    /// (see `topology`); the host gets the rest.
+    core_order: Vec<Vec<u32>>,
 }
 
 impl Controller {
-    /// `core_order` must list every logical CPU exactly once (`limits.total_cores` entries).
+    /// `core_order` has one entry per physical core (`limits.total_cores` entries).
     pub fn new(
         profile: Profile,
         limits: Limits,
         governor: Governor,
         initial: Allocation,
-        core_order: Vec<u32>,
+        core_order: Vec<Vec<u32>>,
     ) -> Self {
         debug_assert_eq!(core_order.len(), limits.total_cores as usize);
         Self {
@@ -123,10 +124,11 @@ impl Controller {
         d
     }
 
-    /// Split `core_order` into (guest, host) CPU sets, each sorted.
+    /// Split `core_order` into (guest, host) logical-CPU sets, each sorted.
     fn split(&self, guest_cores: u32) -> (Vec<u32>, Vec<u32>) {
         let n = (guest_cores as usize).min(self.core_order.len());
-        let (mut g, mut h) = (self.core_order[..n].to_vec(), self.core_order[n..].to_vec());
+        let (mut g, mut h): (Vec<u32>, Vec<u32>) =
+            (self.core_order[..n].concat(), self.core_order[n..].concat());
         g.sort_unstable();
         h.sort_unstable();
         (g, h)
@@ -163,8 +165,23 @@ mod tests {
     use crate::levers::MockLevers;
     use arbiter_policy::SideSignals;
 
+    /// Fixed numbers so these tests don't move when the shipped profile is tuned.
+    const TEST_PROFILE: &str = r#"
+name = "test"
+[default]
+guest_cores = 4
+guest_ram_mb = 8192
+[[rule]]
+name = "windows build"
+guest_foreground_in = ["devenv.exe", "msbuild.exe"]
+guest_cpu_above = 70.0
+[rule.then]
+guest_cores = 6
+guest_ram_mb = 12288
+"#;
+
     fn controller() -> Controller {
-        let p = Profile::from_toml(include_str!("../../../profiles/balanced.toml")).unwrap();
+        let p = Profile::from_toml(TEST_PROFILE).unwrap();
         let limits = Limits::new(8, 32768, 16384);
         let init = Allocation {
             guest_cores: 4,
@@ -172,7 +189,8 @@ mod tests {
             guest_ram_mb: 8192,
         };
         // No-SMT layout: guest takes 7, 6, 5, ... so the sets read as plain ranges.
-        Controller::new(p, limits, Governor::default(), init, (0..8).rev().collect())
+        let order = (0..8).rev().map(|c| vec![c]).collect();
+        Controller::new(p, limits, Governor::default(), init, order)
     }
     fn snap(fg: Option<&str>, cpu: f32, mem_used: u64) -> Snapshot {
         Snapshot {
@@ -320,24 +338,24 @@ mod tests {
 
     #[test]
     fn smt_siblings_never_split_between_host_and_guest() {
-        let p = Profile::from_toml(include_str!("../../../profiles/balanced.toml")).unwrap();
+        let p = Profile::from_toml(TEST_PROFILE).unwrap();
         let init = Allocation {
-            guest_cores: 2,
-            host_cores: 6,
+            guest_cores: 1,
+            host_cores: 3,
             guest_ram_mb: 8192,
         };
-        // siblings (0,4) (1,5) (2,6) (3,7)
+        // 4 physical cores, siblings (0,4) (1,5) (2,6) (3,7)
         let order =
             crate::topology::guest_core_order((0..8).map(|c| vec![c % 4, c % 4 + 4]).collect());
         let mut c = Controller::new(
             p,
-            Limits::new(8, 32768, 16384),
+            Limits::new(4, 32768, 16384),
             Governor::default(),
             init,
             order,
         );
         let mut l = MockLevers::default();
-        c.tick(0, &snap(None, 30.0, 1000), &mut l); // default: 4 guest cores
+        c.tick(0, &snap(None, 30.0, 1000), &mut l); // default wants 4, rails allow 2 physical cores
         assert_eq!(l.pins.last().unwrap(), &vec![2, 3, 6, 7]);
         assert_eq!(l.fences.last().unwrap(), &vec![0, 1, 4, 5]);
     }

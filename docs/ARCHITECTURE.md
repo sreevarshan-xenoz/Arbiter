@@ -53,7 +53,7 @@ the believed state only includes the levers that actually took effect. `cargo ru
 | GPU ownership (v3) | hostdev hot-unplug/re-attach | fallback: switch on VM suspend/shutdown |
 
 ## Safety rails (enforced in `arbiter_policy::clamp`)
-≥2 host cores, ≥2 guest cores; guest RAM ≥ in-use + 1.5 GB and ≤ VM max; GPU handoff only if loser has no GPU clients; manual lock overrides everything.
+Counted in physical cores ([ADR 0006](decisions/0006-core-placement.md)): Linux ≥ 2 cores, Windows ≥ 2 logical CPUs and ≤ the cores its vCPUs need; guest RAM ≥ in-use + 1.5 GB and ≤ VM max; GPU handoff only if loser has no GPU clients; manual lock overrides everything.
 
 ## Protocol (v1)
 `AgentMessage::{Hello, Report}` / `HostMessage::{Welcome, Ack}`. Changing the schema bumps `PROTOCOL_VERSION`; agent and daemon are built against mocks so they can progress independently.

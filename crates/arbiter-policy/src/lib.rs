@@ -15,14 +15,15 @@ pub use signals::{SideSignals, Snapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Allocation {
-    /// Physical cores the Windows vCPUs may run on.
+    /// Physical cores (with all their SMT siblings) the Windows vCPUs may run on.
     pub guest_cores: u32,
-    /// Cores left to the Linux host.
+    /// Physical cores left to the Linux host.
     pub host_cores: u32,
     pub guest_ram_mb: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Core counts are physical cores, not logical CPUs (ADR 0006).
 pub struct Limits {
     pub total_cores: u32,
     pub total_ram_mb: u64,
@@ -32,8 +33,8 @@ pub struct Limits {
     pub guest_ram_headroom_mb: u64,
     /// Windows RAM never exceeds the VM's configured maximum.
     pub guest_ram_max_mb: u64,
-    /// The domain's vCPU count (fixed at boot). Pinning its vCPUs onto more physical cores than
-    /// this gains Windows nothing and only takes cores away from Linux.
+    /// Physical cores needed to hold the domain's vCPUs (fixed at boot). Pinning them onto more
+    /// cores than that gains Windows nothing and only takes cores away from Linux.
     pub max_guest_cores: u32,
 }
 
@@ -54,13 +55,13 @@ impl Limits {
     pub fn validate(&self) -> Result<(), String> {
         if self.total_cores < self.min_host_cores + self.min_guest_cores {
             return Err(format!(
-                "{} CPUs is too few: need {} for Linux + {} for Windows",
+                "{} physical cores is too few: need {} for Linux + {} for Windows",
                 self.total_cores, self.min_host_cores, self.min_guest_cores
             ));
         }
         if self.max_guest_cores < self.min_guest_cores {
             return Err(format!(
-                "VM has {} vCPUs; at least {} are needed",
+                "VM fits on {} physical cores; at least {} are needed",
                 self.max_guest_cores, self.min_guest_cores
             ));
         }
