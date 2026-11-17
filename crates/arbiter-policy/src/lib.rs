@@ -13,6 +13,10 @@ pub use governor::{GovDecision, Governor, HoldReason};
 pub use rules::{Profile, Rule, Want};
 pub use signals::{SideSignals, Snapshot};
 
+/// RAM the Linux host always keeps outside the Windows balloon. Without this, a guest that claims
+/// to be using all of its configured maximum could starve the host of memory.
+pub const HOST_RAM_RESERVE_MB: u64 = 2048;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Allocation {
     /// Physical cores (with all their SMT siblings) the Windows vCPUs may run on.
@@ -65,6 +69,19 @@ impl Limits {
                 self.max_guest_cores, self.min_guest_cores
             ));
         }
+        let usable_ram = self.total_ram_mb.saturating_sub(HOST_RAM_RESERVE_MB);
+        if usable_ram == 0 {
+            return Err(format!(
+                "{} MiB RAM is too little: reserve {} MiB for Linux",
+                self.total_ram_mb, HOST_RAM_RESERVE_MB
+            ));
+        }
+        if self.guest_ram_max_mb > usable_ram {
+            return Err(format!(
+                "guest RAM max {} MiB exceeds the {} MiB usable after reserving {} MiB for Linux",
+                self.guest_ram_max_mb, usable_ram, HOST_RAM_RESERVE_MB
+            ));
+        }
         Ok(())
     }
 }
@@ -83,10 +100,15 @@ pub fn clamp(want: Allocation, l: &Limits, guest_in_use_mb: u64) -> Allocation {
     let guest_cores = want
         .guest_cores
         .clamp(l.min_guest_cores.min(max_guest), max_guest);
+    // The VM maximum is itself capped by physical RAM, so even a guest that reports absurd
+    // in-use figures cannot push the balloon past what the host can actually spare.
+    let ram_max = l
+        .guest_ram_max_mb
+        .min(l.total_ram_mb.saturating_sub(HOST_RAM_RESERVE_MB));
     let ram_floor = guest_in_use_mb
         .saturating_add(l.guest_ram_headroom_mb)
-        .min(l.guest_ram_max_mb);
-    let guest_ram_mb = want.guest_ram_mb.clamp(ram_floor, l.guest_ram_max_mb);
+        .min(ram_max);
+    let guest_ram_mb = want.guest_ram_mb.clamp(ram_floor, ram_max);
     Allocation {
         guest_cores,
         host_cores: l.total_cores.saturating_sub(guest_cores),
@@ -196,5 +218,30 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn guest_ram_is_bounded_by_physical_ram() {
+        let l = Limits::new(8, 8192, 16384); // configured max larger than the machine
+        assert!(
+            l.validate().is_err(),
+            "an overcommitted VM max must be rejected"
+        );
+        let a = clamp(
+            Allocation {
+                guest_cores: 4,
+                host_cores: 4,
+                guest_ram_mb: 16384,
+            },
+            &l,
+            u64::MAX / 2,
+        );
+        assert_eq!(a.guest_ram_mb, 8192 - HOST_RAM_RESERVE_MB);
+    }
+
+    #[test]
+    fn ram_limits_that_leave_nothing_for_linux_are_rejected() {
+        assert!(Limits::new(8, 1024, 512).validate().is_err());
+        assert!(Limits::new(8, 8192, 6144).validate().is_ok());
     }
 }

@@ -92,8 +92,10 @@ pub fn run_session(
         }
         send(port, &AgentMessage::Report(reports.build(probe.sample())))?;
 
-        // Wait out the rest of the tick reading replies.
-        let deadline = start + tick;
+        // Wait out the rest of the tick reading replies. Start counting *after* the sends: if a
+        // send is slow, a deadline taken at `start` can already be past and we would never read
+        // the Welcome/Ack waiting in the socket.
+        let deadline = Instant::now() + tick;
         loop {
             let now = Instant::now();
             if now >= deadline {
@@ -220,5 +222,30 @@ mod tests {
         let mut port = UnixPort::new(a);
         let mut probe = FakeProbe::new(None, 5, 1000);
         assert!(run_session(&mut port, &mut probe, Duration::from_millis(20), None).is_err());
+    }
+
+    #[test]
+    fn slow_sends_still_leave_time_to_read_replies() {
+        struct SlowPort {
+            recv_calls: usize,
+        }
+        impl Port for SlowPort {
+            fn send(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                std::thread::sleep(Duration::from_millis(30)); // longer than the tick
+                Ok(())
+            }
+            fn recv(&mut self, _buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+                self.recv_calls += 1;
+                std::thread::sleep(timeout); // behave like a real blocking port
+                Ok(0)
+            }
+        }
+        let mut port = SlowPort { recv_calls: 0 };
+        let mut probe = FakeProbe::new(None, 5, 1000);
+        run_session(&mut port, &mut probe, Duration::from_millis(10), Some(2)).unwrap();
+        assert_eq!(
+            port.recv_calls, 2,
+            "replies must be read even when sends are slow"
+        );
     }
 }

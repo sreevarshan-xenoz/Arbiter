@@ -5,7 +5,7 @@
 name = "balanced"
 
 # Linux process names that mark the host as running a batch workload.
-host_workloads = ["cargo", "rustc", "cc1", "gcc", "docker", "python3"]
+host_workloads = ["cargo", "rustc", "cc1", "gcc", "dockerd"]
 
 [default]
 guest_cores = 2

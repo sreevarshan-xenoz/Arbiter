@@ -114,9 +114,14 @@ impl Controller {
             GovDecision::Hold(r) => d.outcome = Outcome::Hold(r),
             GovDecision::Apply(next) => {
                 // Re-clamp the intermediate step: a RAM step must still respect in-use + headroom.
+                // This safety floor is deliberately allowed to override the governor's step cap:
+                // a guest that actually needs more RAM must get it before it OOMs.
                 let next = arbiter_policy::clamp(next, &self.limits, guest.mem_used_mb);
                 d.outcome = match self.actuate(next, levers) {
-                    Ok(()) => Outcome::Applied(next),
+                    Ok(()) => {
+                        self.governor.commit(now_ms);
+                        Outcome::Applied(next)
+                    }
                     Err(e) => Outcome::LeverError(e),
                 };
             }
@@ -139,6 +144,9 @@ impl Controller {
     fn actuate(&mut self, next: Allocation, levers: &mut dyn Levers) -> Result<(), String> {
         if next.guest_cores != self.current.guest_cores {
             let (guest, host) = self.split(next.guest_cores);
+            // With two separate levers there is a brief window after the pin and before the fence
+            // where the guest may run on cores the host is still allowed to use. The rollback below
+            // covers failure; eliminating the window entirely needs pause-vCPUs in the backend.
             levers.pin_guest_vcpus(&guest)?;
             if let Err(e) = levers.fence_host_cores(&host) {
                 // Don't leave Windows on cores the host is still allowed to use: undo the pin.
@@ -301,6 +309,27 @@ guest_ram_mb = 12288
         let d = c.tick(0, &building(), &mut l);
         assert!(matches!(d.outcome, Outcome::LeverError(_)));
         assert_eq!(c.current().guest_cores, 4);
+    }
+
+    #[test]
+    fn failed_actuation_does_not_burn_the_cooldown() {
+        let (mut c, mut l) = (
+            controller(),
+            MockLevers {
+                fail: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            c.tick(0, &building(), &mut l).outcome,
+            Outcome::LeverError(_)
+        ));
+        l.fail = false;
+        let d = c.tick(1000, &building(), &mut l);
+        assert!(
+            matches!(d.outcome, Outcome::Applied(_)),
+            "a recoverable lever failure must not freeze the allocation: {d:?}"
+        );
     }
 
     #[test]

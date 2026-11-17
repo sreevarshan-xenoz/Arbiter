@@ -10,6 +10,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Hard cap on a single frame (bytes). Larger frames are rejected unread.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_PROCESSES: usize = 256;
+/// Sanity ceilings for numeric fields. The guest is less trusted, so `u64::MAX` must not be
+/// accepted just because the wire type allows it.
+pub const MAX_REPORT_RAM_MB: u64 = 1024 * 1024; // 1 TiB
+pub const MAX_IDLE_SECS: u64 = 365 * 24 * 60 * 60; // a year: generous, but not u64::MAX
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {
@@ -48,6 +52,12 @@ impl AgentReport {
         if !pct(self.cpu_percent) {
             return Err(ProtoError::Invalid("cpu_percent"));
         }
+        if self.mem_used_mb > MAX_REPORT_RAM_MB {
+            return Err(ProtoError::Invalid("mem_used_mb"));
+        }
+        if self.idle_secs > MAX_IDLE_SECS {
+            return Err(ProtoError::Invalid("idle_secs"));
+        }
         if self.processes.len() > MAX_PROCESSES {
             return Err(ProtoError::Invalid("too many processes"));
         }
@@ -55,7 +65,11 @@ impl AgentReport {
             return Err(ProtoError::Invalid("foreground too long"));
         }
         for p in &self.processes {
-            if !pct(p.cpu_percent) || !pct(p.gpu_percent) || p.name.len() > 260 {
+            if !pct(p.cpu_percent)
+                || !pct(p.gpu_percent)
+                || p.mem_mb > MAX_REPORT_RAM_MB
+                || p.name.len() > 260
+            {
                 return Err(ProtoError::Invalid("process entry"));
             }
         }
@@ -213,6 +227,29 @@ mod tests {
         assert!(r.validate().is_err());
         r.cpu_percent = f32::NAN;
         assert!(r.validate().is_err());
+        assert!(report().validate().is_ok());
+    }
+
+    #[test]
+    fn absurd_u64_fields_are_rejected() {
+        let mut r = report();
+        r.mem_used_mb = u64::MAX;
+        assert!(matches!(
+            r.validate(),
+            Err(ProtoError::Invalid("mem_used_mb"))
+        ));
+        r = report();
+        r.idle_secs = u64::MAX;
+        assert!(matches!(
+            r.validate(),
+            Err(ProtoError::Invalid("idle_secs"))
+        ));
+        r = report();
+        r.processes[0].mem_mb = u64::MAX;
+        assert!(matches!(
+            r.validate(),
+            Err(ProtoError::Invalid("process entry"))
+        ));
         assert!(report().validate().is_ok());
     }
 }

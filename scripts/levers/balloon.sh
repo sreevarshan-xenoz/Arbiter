@@ -16,12 +16,15 @@ case "${1:-}" in
   show)     preflight; v dominfo "$DOMAIN" | grep -i -E 'max memory|used memory'; v dommemstat "$DOMAIN" ;;
   stats-on) preflight; vact dommemstat "$DOMAIN" --period 1 --live ;;
   set)      [ $# -eq 2 ] || usage; valid_uint "$2"; preflight
-            if has_hostdev && [ "${FORCE:-0}" != 1 ]; then
+            if has_hostdev; then hd=0; else hd=$?; fi
+            [ "$hd" -ne 2 ] || die "cannot check for passthrough; refusing to balloon"
+            if [ "$hd" -eq 0 ] && [ "${FORCE:-0}" != 1 ]; then
               die "domain has <hostdev> (passthrough): balloon is disabled by VFIO. Use virtio-mem.sh (FORCE=1 to try anyway)"
             fi
             max_kib=$(v dominfo "$DOMAIN" | awk -F: '/Max memory/ {gsub(/[^0-9]/,"",$2); print $2}')
+            [[ "$max_kib" =~ ^[0-9]+$ ]] || die "cannot read domain max memory from dominfo; refusing to balloon"
             want_kib=$(( $2 * 1024 ))
-            [ -z "$max_kib" ] || [ "$want_kib" -le "$max_kib" ] || die "$2 MiB exceeds domain max ($(( max_kib / 1024 )) MiB); balloon cannot grow past boot maximum"
+            [ "$want_kib" -le "$max_kib" ] || die "$2 MiB exceeds domain max ($(( max_kib / 1024 )) MiB); balloon cannot grow past boot maximum"
             s=$(now_ms); vact setmem "$DOMAIN" "$want_kib" --live
             echo "setmem issued in $(( $(now_ms) - s )) ms; watch '$0 show' / Task Manager in the guest for the real effect" ;;
   *) usage ;;

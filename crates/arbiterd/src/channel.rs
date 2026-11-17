@@ -13,7 +13,6 @@ use arbiter_policy::SideSignals;
 use arbiter_proto::{
     read_frame, write_frame, AgentMessage, HostMessage, ProtoError, PROTOCOL_VERSION,
 };
-use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -23,6 +22,11 @@ use std::time::{Duration, Instant};
 pub const MAX_MSGS_PER_SEC: u32 = 10;
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(10);
+/// A guest that misbehaves gets a longer cooling-off period than a transient disconnect.
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(30);
+/// Bound every read/write so a half-sent frame or a guest that stops draining the socket cannot
+/// wedge the single channel thread forever. Reports arrive every 1-2 s; 10 s is generous slack.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The latest valid guest report and when it arrived, shared with the control loop.
 pub type Latest = Arc<Mutex<Option<(SideSignals, Instant)>>>;
@@ -110,7 +114,17 @@ impl std::fmt::Display for EndReason {
 }
 
 /// Serve one connection until it fails or closes, publishing every accepted report to `latest`.
-pub fn serve<S: Read + Write>(stream: &mut S, latest: &Latest) -> EndReason {
+pub fn serve(stream: &mut UnixStream, latest: &Latest) -> EndReason {
+    serve_with_timeout(stream, latest, IO_TIMEOUT)
+}
+
+fn serve_with_timeout(stream: &mut UnixStream, latest: &Latest, timeout: Duration) -> EndReason {
+    if let Err(e) = stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+    {
+        return EndReason::Proto(ProtoError::Io(e));
+    }
     let mut session = Session::new();
     loop {
         let msg: AgentMessage = match read_frame(stream) {
@@ -128,7 +142,19 @@ pub fn serve<S: Read + Write>(stream: &mut S, latest: &Latest) -> EndReason {
                     }
                 }
             }
-            Err(e) => return EndReason::Session(e),
+            Err(e) => {
+                // A mismatched agent would otherwise re-greet forever without ever learning why
+                // we keep hanging up. Reply with our version so its own check fires immediately.
+                if matches!(e, SessionError::VersionMismatch { .. }) {
+                    let _ = write_frame(
+                        stream,
+                        &HostMessage::Welcome {
+                            protocol: PROTOCOL_VERSION,
+                        },
+                    );
+                }
+                return EndReason::Session(e);
+            }
         }
     }
 }
@@ -145,8 +171,26 @@ pub fn spawn_client(path: PathBuf, latest: Latest) -> std::thread::JoinHandle<()
                     let started = Instant::now();
                     let why = serve(&mut s, &latest);
                     eprintln!("[channel] session ended: {why}");
-                    if started.elapsed() > RECONNECT_MAX {
-                        backoff = RECONNECT_MIN; // it was healthy for a while
+                    match why {
+                        // Rate state lives in `Session`, so a fresh connection starts a fresh
+                        // window. Without a real penalty a flooding guest never gets throttled.
+                        EndReason::Session(SessionError::RateLimited) => {
+                            std::thread::sleep(RATE_LIMIT_BACKOFF);
+                            backoff = RECONNECT_MIN;
+                            continue;
+                        }
+                        EndReason::Session(SessionError::VersionMismatch { agent }) => {
+                            eprintln!(
+                                "[channel] guest speaks protocol v{agent}, this host v{PROTOCOL_VERSION}"
+                            );
+                            std::thread::sleep(RECONNECT_MAX);
+                            backoff = RECONNECT_MIN;
+                            continue;
+                        }
+                        _ if started.elapsed() > RECONNECT_MAX => {
+                            backoff = RECONNECT_MIN; // it was healthy for a while
+                        }
+                        _ => {}
                     }
                 }
                 Err(e) => eprintln!("[channel] cannot connect to {}: {e}", path.display()),
@@ -161,6 +205,7 @@ pub fn spawn_client(path: PathBuf, latest: Latest) -> std::thread::JoinHandle<()
 mod tests {
     use super::*;
     use arbiter_proto::AgentReport;
+    use std::io::Write;
 
     fn hello(v: u32) -> AgentMessage {
         AgentMessage::Hello {
@@ -282,6 +327,42 @@ mod tests {
             EndReason::Proto(ProtoError::FrameTooLarge(_))
         ));
         assert!(latest.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn partial_frame_times_out_instead_of_wedging_the_channel() {
+        let (mut agent, mut host) = UnixStream::pair().unwrap();
+        agent.write_all(&7u32.to_be_bytes()).unwrap();
+        agent.write_all(&[1, 2, 3]).unwrap(); // claims 7 body bytes, sends 3
+        let latest: Latest = Arc::default();
+        let start = Instant::now();
+        let why = serve_with_timeout(&mut host, &latest, Duration::from_millis(50));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(matches!(
+            why,
+            EndReason::Proto(ProtoError::Io(ref e))
+                if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)
+        ));
+        assert!(latest.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn version_mismatch_tells_the_agent_why_we_hang_up() {
+        let (mut agent, mut host) = UnixStream::pair().unwrap();
+        let latest: Latest = Arc::default();
+        let server = std::thread::spawn(move || serve(&mut host, &latest));
+        write_frame(&mut agent, &hello(PROTOCOL_VERSION + 1)).unwrap();
+        let reply: HostMessage = read_frame(&mut agent).unwrap();
+        assert_eq!(
+            reply,
+            HostMessage::Welcome {
+                protocol: PROTOCOL_VERSION
+            }
+        );
+        assert!(matches!(
+            server.join().unwrap(),
+            EndReason::Session(SessionError::VersionMismatch { .. })
+        ));
     }
 
     #[test]

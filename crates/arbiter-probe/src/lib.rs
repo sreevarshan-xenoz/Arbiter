@@ -24,6 +24,9 @@ pub struct Gpu {
     pub vendor_id: u16,
     pub is_integrated_intel: bool,
     pub sriov_totalvfs: u32,
+    /// Some Intel iGPU SR-IOV drivers report `sriov_totalvfs = 0` even when VFs work, so
+    /// capability is also inferred from `sriov_numvfs` and enumerated VF functions.
+    pub sriov_capable: bool,
     pub iommu_group: Option<u32>,
     /// True when the GPU is the only non-bridge VGA/3D function (plus its audio) in its group.
     pub group_isolated: bool,
@@ -63,7 +66,7 @@ pub fn decide_tier(hw: &Hardware) -> Verdict {
     let igpu_sriov = hw
         .gpus
         .iter()
-        .any(|g| g.is_integrated_intel && g.sriov_totalvfs > 0);
+        .any(|g| g.is_integrated_intel && g.sriov_capable);
     let dgpu: Vec<&Gpu> = hw
         .gpus
         .iter()
@@ -135,6 +138,11 @@ pub fn collect(sys: &Path, proc_cpuinfo: &Path, proc_meminfo: &Path) -> Hardware
                 .ok()
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0);
+            let sriov_numvfs = fs::read_to_string(p.join("sriov_numvfs"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            let sriov_capable = sriov_totalvfs > 0 || sriov_numvfs > 0 || has_sriov_vfs(sys, &addr);
             let group = fs::read_link(p.join("iommu_group"))
                 .ok()
                 .and_then(|l| l.file_name()?.to_str()?.parse::<u32>().ok());
@@ -148,6 +156,7 @@ pub fn collect(sys: &Path, proc_cpuinfo: &Path, proc_meminfo: &Path) -> Hardware
                 vendor_id,
                 is_integrated_intel,
                 sriov_totalvfs,
+                sriov_capable,
                 iommu_group: group,
                 group_isolated,
             });
@@ -170,8 +179,21 @@ fn read_hex(p: &Path) -> Option<u32> {
     .ok()
 }
 
+/// True when a PCI function declares this GPU as its physical function (an enumerated SR-IOV VF).
+fn has_sriov_vfs(sys: &Path, gpu_addr: &str) -> bool {
+    let Ok(dir) = fs::read_dir(sys.join("bus/pci/devices")) else {
+        return false;
+    };
+    dir.flatten().any(|e| {
+        fs::read_link(e.path().join("physfn"))
+            .ok()
+            .and_then(|l| l.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .is_some_and(|n| n == gpu_addr)
+    })
+}
+
 /// Isolated = every other device in the group is the GPU's own audio function
-/// (same slot, function != 0) or a PCI bridge (class 0x0604).
+/// (class 0x0403 on the same slot) or a PCI bridge (class 0x0604).
 fn group_is_isolated(devices: &Path, gpu_addr: &str) -> bool {
     let slot = gpu_addr.rsplit_once('.').map(|x| x.0).unwrap_or(gpu_addr);
     let Ok(rd) = fs::read_dir(devices) else {
@@ -179,12 +201,15 @@ fn group_is_isolated(devices: &Path, gpu_addr: &str) -> bool {
     };
     for d in rd.flatten() {
         let name = d.file_name().to_string_lossy().into_owned();
-        if name == gpu_addr || name.starts_with(&format!("{slot}.")) {
+        if name == gpu_addr {
             continue;
         }
         // devices in the group are symlinks into /sys/devices; class is readable via the link
-        let class = read_hex(&d.path().join("class")).unwrap_or(0);
-        if class >> 8 != 0x0604 {
+        let class = read_hex(&d.path().join("class")).unwrap_or(0) >> 8;
+        if name.starts_with(&format!("{slot}.")) && class == 0x0403 {
+            continue; // the GPU's own audio function
+        }
+        if class != 0x0604 {
             return false;
         }
     }
@@ -205,6 +230,7 @@ mod tests {
             vendor_id: if intel { 0x8086 } else { 0x10de },
             is_integrated_intel: intel,
             sriov_totalvfs: sriov,
+            sriov_capable: sriov > 0,
             iommu_group: Some(1),
             group_isolated: isolated,
         }
@@ -240,6 +266,13 @@ mod tests {
             Tier::T1
         );
     }
+    #[test]
+    fn sriov_capable_igpu_is_t1_even_when_totalvfs_reads_zero() {
+        let mut g = gpu(true, 0, false);
+        g.sriov_capable = true; // driver reports VFs via sriov_numvfs / physfn instead
+        assert_eq!(decide_tier(&hw(true, true, vec![g])).tier, Tier::T1);
+    }
+
     #[test]
     fn igpu_plus_isolated_dgpu_is_t2() {
         assert_eq!(

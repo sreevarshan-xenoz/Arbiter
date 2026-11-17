@@ -38,9 +38,6 @@ dependencies = [
 [[package]]
 name = "arbiter-shell"
 version = "0.0.1"
-dependencies = [
- "arbiter-proto",
-]
 
 [[package]]
 name = "arbiterd"

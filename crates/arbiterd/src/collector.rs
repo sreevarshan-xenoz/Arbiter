@@ -22,10 +22,26 @@ pub fn parse_cpu_times(stat: &str) -> Option<(u64, u64)> {
     if v.len() < 4 {
         return None;
     }
-    let total: u64 = v.iter().take(8).sum();
-    let idle = v[3] + v.get(4).copied().unwrap_or(0); // idle + iowait
-    let guest = v.get(8).copied().unwrap_or(0) + v.get(9).copied().unwrap_or(0);
+    let total: u64 = v.iter().take(8).fold(0u64, |a, &b| a.saturating_add(b));
+    let idle = v[3].saturating_add(v.get(4).copied().unwrap_or(0)); // idle + iowait
+    let guest = v
+        .get(8)
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(v.get(9).copied().unwrap_or(0));
     Some((total.saturating_sub(idle).saturating_sub(guest), total))
+}
+
+/// CPU load from the last good sample and this one. Returns the percentage and the sample to
+/// carry forward: a failed read must not clear `prev`, or the next tick reports a false 0%.
+fn cpu_delta(prev: Option<(u64, u64)>, cur: Option<(u64, u64)>) -> (f32, Option<(u64, u64)>) {
+    let pct = match (prev, cur) {
+        (Some((pb, pt)), Some((cb, ct))) if ct > pt => {
+            (cb.saturating_sub(pb)) as f32 * 100.0 / (ct - pt) as f32
+        }
+        _ => 0.0,
+    };
+    (pct, cur.or(prev))
 }
 
 /// Used memory in MiB = MemTotal - MemAvailable.
@@ -94,13 +110,8 @@ impl Collector for ProcCollector {
         let cur = fs::read_to_string("/proc/stat")
             .ok()
             .and_then(|s| parse_cpu_times(&s));
-        let cpu_percent = match (self.prev, cur) {
-            (Some((pb, pt)), Some((cb, ct))) if ct > pt => {
-                (cb.saturating_sub(pb)) as f32 * 100.0 / (ct - pt) as f32
-            }
-            _ => 0.0,
-        };
-        self.prev = cur;
+        let (cpu_percent, prev) = cpu_delta(self.prev, cur);
+        self.prev = prev;
         let mem_used_mb = fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|s| parse_mem_used_mb(&s))
@@ -151,6 +162,22 @@ mod tests {
         let (busy, total) = parse_cpu_times("cpu  600 0 50 300 50 0 0 0 500 0\n").unwrap();
         assert_eq!((busy, total), (150, 1000));
     }
+    #[test]
+    fn a_failed_read_keeps_the_last_good_sample() {
+        let (pct, prev) = cpu_delta(None, Some((10, 100)));
+        assert_eq!(pct, 0.0); // first sample has no delta yet
+        let (pct, prev) = cpu_delta(prev, Some((20, 200)));
+        assert_eq!(pct, 10.0);
+        let (pct, prev) = cpu_delta(prev, None); // /proc/stat read failed this tick
+        assert_eq!(pct, 0.0);
+        assert_eq!(prev, Some((20, 200)));
+        let (pct, _) = cpu_delta(prev, Some((40, 400)));
+        assert_eq!(
+            pct, 10.0,
+            "the failed read must not reset the delta baseline"
+        );
+    }
+
     #[test]
     fn guest_age_grows_while_the_channel_is_silent() {
         let mut c = ProcCollector::new(vec![]);

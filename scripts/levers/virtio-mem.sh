@@ -29,16 +29,20 @@ for m in ET.fromstring(sys.stdin.read()).iter("memory"):
         return int(int(e.text) * U[e.get("unit", "KiB")]) if e is not None else -1
     print(kib("requested"), kib("current")); break
 else:
-    sys.exit(3)' "$ALIAS" || die "no virtio-mem device with alias '$ALIAS' (see virtio-mem-device.xml)"
+    sys.exit(3)' "$ALIAS" || return 3
 }
 
 case "${1:-}" in
-  show)   preflight; read -r req cur < <(sizes); echo "requested=$(( req / 1024 )) MiB  plugged=$(( cur / 1024 )) MiB" ;;
+  show)   preflight; out=$(sizes) || die "no virtio-mem device with alias '$ALIAS' (see virtio-mem-device.xml)"
+          read -r req cur <<< "$out"; echo "requested=$(( req / 1024 )) MiB  plugged=$(( cur / 1024 )) MiB" ;;
   resize) [ $# -eq 2 ] || usage; valid_uint "$2"; preflight
           vact update-memory-device "$DOMAIN" --alias "$ALIAS" --requested-size "$(( $2 * 1024 ))" --live ;;
-  wait)   [ $# -ge 2 ] || usage; valid_uint "$2"; preflight; to="${3:-30}"; s=$(now_ms)
+  wait)   [ $# -ge 2 ] || usage; valid_uint "$2"; preflight; to="${3:-30}"; valid_uint "$to"
+          [ "$to" -ge 1 ] || die "timeout must be >= 1 second"
+          s=$(now_ms)
           while :; do
-            read -r req cur < <(sizes); el=$(( $(now_ms) - s ))
+            out=$(sizes) || die "no virtio-mem device with alias '$ALIAS' (see virtio-mem-device.xml)"
+            read -r req cur <<< "$out"; el=$(( $(now_ms) - s ))
             if [ "$cur" -eq "$(( $2 * 1024 ))" ]; then echo "converged: plugged=$(( cur / 1024 )) MiB after ${el} ms"; exit 0; fi
             [ "$el" -lt $(( to * 1000 )) ] || { echo "TIMEOUT after ${el} ms: requested=$(( req / 1024 )) plugged=$(( cur / 1024 )) MiB (MSI-X bug? try MSI-X off)" >&2; exit 2; }
             sleep 0.5

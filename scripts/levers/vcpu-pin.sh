@@ -25,7 +25,10 @@ case "${1:-}" in
     echo "pinned $n vCPU(s) to $2 in $(( $(now_ms) - s )) ms" ;;
   reset)
     preflight
-    last=$(( $(nproc --all) - 1 ))
-    exec "$0" pin "0-$last" ;;
+    # Use the kernel's actual online CPU list (it can be sparse); re-pin vCPUs to all of them AND
+    # widen the emulator pin, otherwise a previous EMULATOR_CPUS=... pin survives "reset".
+    online=$(tr -d '\n' < /sys/devices/system/cpu/online 2>/dev/null || true)
+    [ -n "$online" ] || die "cannot read /sys/devices/system/cpu/online"
+    EMULATOR_CPUS="$online" exec "$0" pin "$online" ;;
   *) usage ;;
 esac

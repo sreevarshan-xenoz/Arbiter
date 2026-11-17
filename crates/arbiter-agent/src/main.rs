@@ -112,16 +112,26 @@ fn main() {
 
 /// Play QEMU + a Windows guest: bind `path` (as QEMU does for the domain's channel) and serve
 /// every arbiterd connection with a fake probe.
+/// Bind the stand-in channel socket with guest-only rights, as QEMU does for the real one.
 #[cfg(unix)]
-fn dev_listen(path: &str, args: &Args, tick: Duration) {
-    use std::os::unix::fs::FileTypeExt;
+fn bind_private_socket(path: &str) -> std::io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
 
     // Only ever remove a stale *socket*, never some other file at that path.
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path)?;
     }
-    let listener = UnixListener::bind(path).unwrap_or_else(|e| {
+    let listener = UnixListener::bind(path)?;
+    // The ambient umask alone is not enough: with a permissive umask any local user could
+    // connect and forge guest reports (docs/SECURITY-MODEL.md).
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn dev_listen(path: &str, args: &Args, tick: Duration) {
+    let listener = bind_private_socket(path).unwrap_or_else(|e| {
         eprintln!("cannot bind {path}: {e}");
         std::process::exit(2)
     });
@@ -141,4 +151,27 @@ fn dev_listen(path: &str, args: &Args, tick: Duration) {
         }
     }
     let _ = std::fs::remove_file(path);
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_socket_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("arbiter-agent-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = bind_private_socket(path.to_str().unwrap()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the guest socket must not be world-connectable"
+        );
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

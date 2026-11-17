@@ -14,6 +14,9 @@ pub enum LoadClass {
 }
 
 pub const IDLE_CPU_PERCENT: f32 = 10.0;
+/// A named batch process only counts when it is actually using CPU: long-lived low-CPU daemons
+/// (python helpers, dockerd) must not make the host look like it needs the guest's cores.
+pub const BATCH_WORKLOAD_CPU_PERCENT: f32 = 20.0;
 pub const BATCH_CPU_PERCENT: f32 = 60.0;
 pub const BATCH_NO_INPUT_SECS: u64 = 30;
 
@@ -22,7 +25,7 @@ pub fn classify(s: &SideSignals) -> LoadClass {
         LoadClass::GpuHeavy
     } else if s.cpu_percent < IDLE_CPU_PERCENT {
         LoadClass::Idle
-    } else if !s.workloads.is_empty()
+    } else if (!s.workloads.is_empty() && s.cpu_percent >= BATCH_WORKLOAD_CPU_PERCENT)
         || (s.cpu_percent >= BATCH_CPU_PERCENT && s.idle_secs >= BATCH_NO_INPUT_SECS)
     {
         LoadClass::Batch
@@ -56,8 +59,13 @@ mod tests {
         assert_eq!(classify(&s(90.0, 120, false, &[])), LoadClass::Batch);
     }
     #[test]
-    fn named_workload_is_batch() {
+    fn named_workload_is_batch_only_when_it_is_using_cpu() {
         assert_eq!(classify(&s(30.0, 0, false, &["cargo"])), LoadClass::Batch);
+        assert_eq!(
+            classify(&s(15.0, 0, false, &["python3"])),
+            LoadClass::Interactive
+        );
+        assert_eq!(classify(&s(2.0, 0, false, &["python3"])), LoadClass::Idle);
     }
     #[test]
     fn gpu_beats_everything() {

@@ -8,14 +8,42 @@ use std::fs;
 
 /// Sibling groups -> physical cores (each a sorted list of its logical CPUs) in the order the
 /// guest should take them: ordered by their lowest CPU id, highest first.
-pub fn guest_core_order(mut groups: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-    for g in &mut groups {
-        g.sort_unstable();
-        g.dedup();
+pub fn guest_core_order(groups: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+    let mut groups: Vec<Vec<u32>> = groups
+        .into_iter()
+        .map(|mut g| {
+            g.sort_unstable();
+            g.dedup();
+            g
+        })
+        .filter(|g| !g.is_empty())
+        .collect();
+    // Inconsistent sysfs (partial CPU hotplug, odd firmware) can report sibling groups that
+    // overlap only partially, e.g. [0] and [0,4]. Merge until no logical CPU appears in two
+    // groups; otherwise `split` could put that CPU on both sides of the guest/host boundary.
+    loop {
+        let mut merged = false;
+        let mut i = 0;
+        while i < groups.len() {
+            let mut j = i + 1;
+            while j < groups.len() {
+                if groups[i].iter().any(|c| groups[j].binary_search(c).is_ok()) {
+                    let other = groups.remove(j);
+                    groups[i].extend(other);
+                    groups[i].sort_unstable();
+                    groups[i].dedup();
+                    merged = true;
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        if !merged {
+            break;
+        }
     }
-    groups.retain(|g| !g.is_empty());
     groups.sort_unstable();
-    groups.dedup();
     groups.reverse();
     groups
 }
@@ -92,6 +120,21 @@ mod tests {
         let plain = guest_core_order((0..4).map(|c| vec![c]).collect());
         assert_eq!(cores_for_cpus(&plain, 2), 2);
         assert_eq!(cores_for_cpus(&plain, 0), 0);
+    }
+
+    #[test]
+    fn overlapping_sibling_groups_are_merged() {
+        let order = guest_core_order(vec![
+            vec![0],
+            vec![0, 4],
+            vec![1, 5],
+            vec![2, 6],
+            vec![3, 7],
+        ]);
+        assert_eq!(order, vec![vec![3, 7], vec![2, 6], vec![1, 5], vec![0, 4]]);
+        let mut cpus: Vec<u32> = order.iter().flatten().copied().collect();
+        cpus.sort_unstable();
+        assert_eq!(cpus, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

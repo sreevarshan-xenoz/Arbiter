@@ -11,9 +11,11 @@ case "$1" in
   schedinfo) echo "cpu_shares      : 1024" ;;
   version)   echo "Using library: libvirt 10.0.0" ;;
   dumpxml)
+    [ "${FAKE_DUMPXML_FAIL:-0}" = 1 ] && { echo "libvirt error" >&2; exit 1; }
     echo "<domain>"
     [ "${FAKE_HOSTDEV:-0}" = 1 ] && echo "  <hostdev mode='subsystem' type='pci'/>"
     echo "  <memory model='virtio-mem'><target><size unit='GiB'>16</size><requested unit='MiB'>${FAKE_REQ_MIB:-2048}</requested><current unit='MiB'>${FAKE_CUR_MIB:-2048}</current></target><alias name='ua-vmem0'/></memory>"
+    [ "${FAKE_BIG_XML:-0}" = 1 ] && seq 1 5000 | sed 's/^/  <filler\/>/'
     echo "</domain>" ;;
   *) echo ok ;;
 esac

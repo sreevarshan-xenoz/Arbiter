@@ -18,6 +18,7 @@ struct Args {
     guest_max_ram_mb: Option<u64>,
     guest_vcpus: Option<u32>,
     agent_socket: Option<String>,
+    check_libvirt: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -28,6 +29,7 @@ fn parse_args() -> Result<Args, String> {
         guest_max_ram_mb: None,
         guest_vcpus: None,
         agent_socket: None,
+        check_libvirt: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -51,7 +53,7 @@ fn parse_args() -> Result<Args, String> {
                 )
             }
             "--agent-socket" => a.agent_socket = Some(val("--agent-socket")?),
-            "--check-libvirt" => {}
+            "--check-libvirt" => a.check_libvirt = true,
             "-h" | "--help" => return Err(
                 "usage: arbiterd [--profile FILE] [--tick-ms N] [--ticks N] [--guest-max-ram-mb N] [--guest-vcpus N] [--agent-socket PATH]"
                     .into(),
@@ -84,8 +86,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(not(feature = "libvirt"))]
+    if args.check_libvirt {
+        eprintln!("--check-libvirt requires arbiterd built with the libvirt feature");
+        std::process::exit(2);
+    }
     #[cfg(feature = "libvirt")]
-    if std::env::args().any(|a| a == "--check-libvirt") {
+    if args.check_libvirt {
         match levers::libvirt_backend::list_domains() {
             Ok(d) => println!("libvirt ok, domains: {d:?}"),
             Err(e) => eprintln!("libvirt error: {e}"),

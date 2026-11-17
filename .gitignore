@@ -6,3 +6,4 @@
 __pycache__/
 ml/.venv/
 bench/results/*.csv
+/*.pdf

@@ -8,7 +8,8 @@ echo "== IOMMU in kernel log =="
 sudo dmesg | grep -i -e DMAR -e IOMMU | head
 echo "== IOMMU groups =="
 for g in /sys/kernel/iommu_groups/*/; do
-  echo "IOMMU Group ${g##*/}:"
+  gn=${g%/}   # drop the trailing slash that the glob adds
+  echo "IOMMU Group ${gn##*/}:"
   for d in $g/devices/*; do
     echo -e "\t$(lspci -nns ${d##*/})"
   done

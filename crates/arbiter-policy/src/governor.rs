@@ -47,9 +47,10 @@ impl Default for Governor {
 impl Governor {
     pub fn step(&mut self, now_ms: u64, current: Allocation, target: Allocation) -> GovDecision {
         let dc = i64::from(target.guest_cores) - i64::from(current.guest_cores);
-        let dr = target.guest_ram_mb as i64 - current.guest_ram_mb as i64;
+        // i128: a u64 RAM size can exceed i64::MAX and would otherwise wrap into a fake shrink.
+        let dr = i128::from(target.guest_ram_mb) - i128::from(current.guest_ram_mb);
         let move_cores = dc != 0 && dc.unsigned_abs() >= u64::from(self.core_band);
-        let move_ram = dr != 0 && dr.unsigned_abs() >= self.ram_band_mb;
+        let move_ram = dr != 0 && dr.unsigned_abs() >= u128::from(self.ram_band_mb);
         if !move_cores && !move_ram {
             return GovDecision::Hold(HoldReason::WithinBand);
         }
@@ -69,11 +70,16 @@ impl Governor {
             next.host_cores = current.host_cores + current.guest_cores - next.guest_cores;
         }
         if move_ram {
-            let cap = self.max_ram_step_mb as i64;
-            next.guest_ram_mb = (current.guest_ram_mb as i64 + dr.clamp(-cap, cap)) as u64;
+            let cap = i128::from(self.max_ram_step_mb);
+            next.guest_ram_mb = (i128::from(current.guest_ram_mb) + dr.clamp(-cap, cap)) as u64;
         }
-        self.last_change_ms = Some(now_ms);
         GovDecision::Apply(next)
+    }
+
+    /// Start the cooldown only once the controller has actually actuated the move. Recording it
+    /// in `step` would freeze the allocation for a change that failed to apply.
+    pub fn commit(&mut self, now_ms: u64) {
+        self.last_change_ms = Some(now_ms);
     }
 }
 
@@ -106,6 +112,7 @@ mod tests {
             g.step(0, a(4, 8192), a(6, 8192)),
             GovDecision::Apply(a(6, 8192))
         );
+        g.commit(0);
         assert_eq!(
             g.step(1000, a(6, 8192), a(4, 8192)),
             GovDecision::Hold(HoldReason::Cooldown)
@@ -127,6 +134,21 @@ mod tests {
         };
         assert_eq!((n.guest_cores, n.host_cores, n.guest_ram_mb), (4, 4, 5000));
     }
+    #[test]
+    fn a_failed_move_does_not_start_the_cooldown() {
+        let mut g = Governor::default();
+        assert_eq!(
+            g.step(0, a(4, 8192), a(6, 8192)),
+            GovDecision::Apply(a(6, 8192))
+        );
+        // No commit: the lever failed, so nothing actually changed.
+        assert_eq!(
+            g.step(1000, a(4, 8192), a(6, 8192)),
+            GovDecision::Apply(a(6, 8192)),
+            "a recoverable failure must be retryable immediately"
+        );
+    }
+
     #[test]
     fn only_the_lever_outside_its_band_moves() {
         let mut g = Governor::default();

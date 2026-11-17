@@ -35,4 +35,12 @@ expect "pause"                    "suspend arbiter-win" -- ./vm-power.sh pause
 expect "managed save (no hostdev)" "managedsave arbiter-win" -- ./vm-power.sh save
 rejects "managed save w/ hostdev" -- env FAKE_HOSTDEV=1 ./vm-power.sh save
 expect "status runs"              "## virtio-mem" -- ./status.sh
+rejects "descending cpulist"       -- ./vcpu-pin.sh pin 5-2
+rejects "malformed cpulist"        -- ./vcpu-pin.sh pin 1-2-3
+rejects "leading-zero uint"        -- ./balloon.sh set 010
+expect "reset unpins emulator"    "emulatorpin arbiter-win 0-" -- ./vcpu-pin.sh reset
+rejects "balloon fails closed if XML unreadable"   -- env FAKE_DUMPXML_FAIL=1 ./balloon.sh set 4096
+rejects "save fails closed if XML unreadable"      -- env FAKE_DUMPXML_FAIL=1 ./vm-power.sh save
+rejects "hostdev found in large XML"               -- env FAKE_HOSTDEV=1 FAKE_BIG_XML=1 ./balloon.sh set 4096
+rejects "virtio-mem wait bad timeout"              -- ./virtio-mem.sh wait 4096 abc
 echo; echo "$pass passed, $fail failed"; rm -f "$FAKE_LOG"; [ $fail -eq 0 ]

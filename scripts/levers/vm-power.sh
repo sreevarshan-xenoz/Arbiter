@@ -18,7 +18,9 @@ case "${1:-}" in
   pause)   preflight; s=$(now_ms); vact suspend "$DOMAIN"; echo "paused in $(( $(now_ms) - s )) ms" ;;
   resume)  s=$(now_ms); vact resume "$DOMAIN"; echo "resumed in $(( $(now_ms) - s )) ms" ;;
   save)    preflight
-           has_hostdev && die "domain has <hostdev>: libvirt cannot managed-save it. Use 'pause' or hibernate Windows from inside"
+           if has_hostdev; then hd=0; else hd=$?; fi
+           [ "$hd" -ne 2 ] || die "cannot check for passthrough; refusing managed save"
+           [ "$hd" -ne 0 ] || die "domain has <hostdev>: libvirt cannot managed-save it. Use 'pause' or hibernate Windows from inside"
            s=$(now_ms); vact managedsave "$DOMAIN"; echo "saved in $(( $(now_ms) - s )) ms" ;;
   restore) s=$(now_ms); vact start "$DOMAIN"; echo "restored in $(( $(now_ms) - s )) ms (measure 'click to window' separately)" ;;
   *) usage ;;

@@ -16,7 +16,29 @@ exit 1; }
 case "${1:-}" in
   show)    for u in "${UNITS[@]}"; do "$SYSTEMCTL" show "$u" -p Id -p AllowedCPUs -p EffectiveCPUs; done ;;
   fence)   [ $# -eq 2 ] || usage; valid_cpulist "$2"
-           s=$(now_ms); for u in "${UNITS[@]}"; do sact set-property --runtime "$u" "AllowedCPUs=$2"; done
+           s=$(now_ms)
+           # Snapshot first so a failure on the 2nd/3rd unit can be rolled back: leaving only
+           # some units fenced would overlap the guest's vCPUs instead of isolating them.
+           old=()
+           if [ "$DRY_RUN" = 1 ]; then
+             for _ in "${UNITS[@]}"; do old+=(""); done
+           else
+             for u in "${UNITS[@]}"; do
+               val=$( "$SYSTEMCTL" show "$u" -p AllowedCPUs 2>/dev/null || true )
+               old+=( "${val#AllowedCPUs=}" )
+             done
+           fi
+           applied=()
+           for i in "${!UNITS[@]}"; do
+             if sact set-property --runtime "${UNITS[$i]}" "AllowedCPUs=$2"; then
+               applied+=("$i")
+             else
+               for j in "${applied[@]}"; do
+                 sact set-property --runtime "${UNITS[$j]}" "AllowedCPUs=${old[$j]}" || true
+               done
+               die "failed to fence ${UNITS[$i]}; rolled back ${#applied[@]} unit(s)"
+             fi
+           done
            echo "fenced host to $2 in $(( $(now_ms) - s )) ms" ;;
   unfence) for u in "${UNITS[@]}"; do sact set-property --runtime "$u" AllowedCPUs=; done ;;
   *) usage ;;

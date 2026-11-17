@@ -30,9 +30,30 @@ act() {
 vact() { act "$VIRSH" -c "$CONNECT" "$@"; }
 sact() { act "${SUDO[@]}" "$SYSTEMCTL" "$@"; }
 
-valid_cpulist() { [[ "$1" =~ ^[0-9]+([-,][0-9]+)*$ ]] || die "bad cpu list '$1' (examples: 2-5 or 0,1,6,7)"; }
-valid_uint()    { [[ "$1" =~ ^[0-9]+$ ]] || die "expected a positive integer, got '$1'"; }
-has_hostdev()   { v dumpxml "$DOMAIN" | grep -q "<hostdev"; }
+valid_cpulist() {
+  [[ "$1" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || die "bad cpu list '$1' (examples: 2-5 or 0,1,6,7)"
+  local part a b
+  local -a parts
+  IFS=',' read -r -a parts <<< "$1"
+  for part in "${parts[@]}"; do
+    if [[ "$part" == *-* ]]; then
+      a=${part%-*}; b=${part#*-}
+      [ $((10#$a)) -le $((10#$b)) ] || die "descending cpu range '$part'"
+    fi
+  done
+}
+# No leading zeros: bash treats 010 as octal 8 and 08 as an arithmetic error.
+valid_uint()    { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]] || die "expected a non-negative integer, got '$1'"; }
+# Returns 0 = has hostdev, 1 = none, 2 = could not tell (callers MUST fail closed on 2).
+# `grep -q` in a pipeline would SIGPIPE a large dumpxml; with pipefail that looks like "no hostdev".
+has_hostdev() {
+  local xml
+  if ! xml=$(v dumpxml "$DOMAIN"); then
+    echo "error: cannot read '$DOMAIN' XML; refusing to assume no passthrough" >&2
+    return 2
+  fi
+  [[ "$xml" == *"<hostdev"* ]]
+}
 domain_running(){ [ "$(v domstate "$DOMAIN" | tr -d '[:space:]')" = "running" ]; }
 
 preflight() {

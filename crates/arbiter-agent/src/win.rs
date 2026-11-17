@@ -44,6 +44,19 @@ pub struct WinPort {
 // SAFETY: the handles are owned by this struct and only used through &mut self.
 unsafe impl Send for WinPort {}
 
+/// Classify the immediate result of `ReadFile`/`WriteFile`. When the call completes synchronously
+/// (`ok != 0`) the event is NOT signalled, so we must return the byte count instead of waiting —
+/// otherwise every synchronous completion stalls for the full timeout and looks like a failure.
+fn start_result(ok: i32, err: u32, n: u32) -> Result<Option<usize>, io::Error> {
+    if ok != 0 {
+        Ok(Some(n as usize))
+    } else if err == ERROR_IO_PENDING {
+        Ok(None) // wait on the event
+    } else {
+        Err(io::Error::from_raw_os_error(err as i32))
+    }
+}
+
 impl WinPort {
     pub fn open(path: &str) -> io::Result<Self> {
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
@@ -83,31 +96,38 @@ impl WinPort {
         len: usize,
         timeout: Duration,
     ) -> io::Result<usize> {
-        let len = u32::try_from(len).unwrap_or(u32::MAX);
+        let len = u32::try_from(len).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "buffer too large for Win32 I/O",
+            )
+        })?;
         // SAFETY: OVERLAPPED is plain data; all-zero is its documented initial state.
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
         ov.hEvent = self.event;
+        let mut n: u32 = 0;
         // SAFETY: `ptr`/`len` describe a live buffer owned by the caller that stays borrowed until
         // this function returns, and we never return before the operation has completed or been
         // cancelled-and-waited-for, so the kernel never touches `ov` or the buffer afterwards.
         let ok = unsafe {
             if write {
-                WriteFile(self.handle, ptr, len, null_mut(), &mut ov)
+                WriteFile(self.handle, ptr, len, &mut n, &mut ov)
             } else {
-                ReadFile(self.handle, ptr, len, null_mut(), &mut ov)
+                ReadFile(self.handle, ptr, len, &mut n, &mut ov)
             }
         };
-        if ok == 0 {
-            // SAFETY: no preconditions.
-            let err = unsafe { GetLastError() };
-            if err != ERROR_IO_PENDING {
-                return Err(io::Error::from_raw_os_error(err as i32));
-            }
+        // Only query the error on failure; on success GetLastError() is undefined.
+        let err = if ok == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        if let Some(n) = start_result(ok, err, n)? {
+            return Ok(n);
         }
         let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         // SAFETY: valid event handle.
         let waited = unsafe { WaitForSingleObject(self.event, ms) };
-        let mut n: u32 = 0;
         if waited == WAIT_TIMEOUT {
             // SAFETY: cancel our own pending operation, then block until it is really finished
             // so `ov` and the buffer can be released.
@@ -257,5 +277,18 @@ impl Probe for WinProbe {
             mem_used_mb: Self::mem_used_mb(),
             idle_secs: Self::idle_secs(),
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synchronous_completion_is_reported_without_waiting() {
+        // WriteFile/ReadFile returning TRUE means the event is not signalled: use the byte count.
+        assert_eq!(start_result(1, 0, 42).unwrap(), Some(42));
+        assert_eq!(start_result(0, ERROR_IO_PENDING, 0).unwrap(), None);
+        assert!(start_result(0, 5, 0).is_err()); // ERROR_ACCESS_DENIED
     }
 }
